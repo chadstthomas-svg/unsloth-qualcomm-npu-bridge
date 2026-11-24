@@ -343,7 +343,7 @@ def _patch_npu_backend_module(mod: Any) -> None:
                 rest = text[len(_REPO_OWNER) :]
                 return bool(rest) and "/" not in rest and ":" not in rest
             if ":" not in text and bool(_DISPLAY_NAME_SUFFIX.search(text)):
-                return "/" not in text or text.lower().startswith(("unsloth/", "qualcomm/", "nexaai/"))
+                return text.count("/") <= 1
             return False
 
         mod.looks_like_npu_display_name = _tag(wrapped_looks_like)

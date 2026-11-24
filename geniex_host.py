@@ -186,11 +186,42 @@ class GenieX:
         except (OSError, ValueError):
             return []
 
+    def _geniex_data_dir(self) -> Path:
+        env_dir = os.environ.get("GENIEX_DATADIR", "").strip()
+        return Path(os.path.expanduser(env_dir)) if env_dir else (Path.home() / ".cache" / "geniex")
+
+    def _precision_size_gb(self, name: str, precision: Optional[str], fallback_bytes: Any) -> Optional[float]:
+        if precision:
+            parts = [p for p in name.strip().replace("\\", "/").split("/") if p]
+            if len(parts) >= 2:
+                manifest = self._geniex_data_dir() / "models" / Path(*parts) / "geniex.json"
+                try:
+                    data = json.loads(manifest.read_text(encoding="utf-8"))
+                    mfile = (data.get("ModelFile") or {}).get(precision) or {}
+                    p_size = mfile.get("Size")
+                    if isinstance(p_size, (int, float)) and p_size > 0:
+                        return round(float(p_size) / 1e9, 2)
+                except (OSError, ValueError, TypeError):
+                    pass
+        if isinstance(fallback_bytes, (int, float)) and fallback_bytes > 0:
+            return round(float(fallback_bytes) / 1e9, 2)
+        return None
+
+    def _sync_studio_exports(self) -> None:
+        """Auto-discover Hexagon-compatible GGUFs under Unsloth Studio's exports/ folder."""
+        try:
+            import convert_to_hexagon
+
+            convert_to_hexagon.scan_studio_exports(self._geniex_data_dir(), auto_quantize=False)
+        except Exception:
+            pass
+
     def catalog(self) -> list[dict[str, Any]]:
+        self._sync_studio_exports()
         cached = self.cached_models()
-        # Map both "org/repo:QUANT" and bare "org/repo" -> cached record
-        cached_by_checkpoint: dict[str, dict[str, Any]] = {}
-        cached_by_repo: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        # Map "org/repo:QUANT" -> (ckpt_actual, prec, entry) and "org/repo" -> list[...]
+        cached_by_checkpoint: dict[str, tuple[str, Optional[str], dict[str, Any]]] = {}
+        cached_by_repo: dict[str, list[tuple[str, Optional[str], dict[str, Any]]]] = {}
         for entry in cached:
             name = str(entry.get("name") or "").strip()
             if not name:
@@ -199,11 +230,11 @@ class GenieX:
             if isinstance(precs, list) and precs:
                 for prec in precs:
                     ckpt = f"{name}:{prec}"
-                    cached_by_checkpoint[ckpt.lower()] = entry
-                    cached_by_repo.setdefault(name.lower(), []).append((ckpt, entry))
+                    cached_by_checkpoint[ckpt.lower()] = (ckpt, str(prec), entry)
+                    cached_by_repo.setdefault(name.lower(), []).append((ckpt, str(prec), entry))
             else:
-                cached_by_checkpoint[name.lower()] = entry
-                cached_by_repo.setdefault(name.lower(), []).append((name, entry))
+                cached_by_checkpoint[name.lower()] = (name, None, entry)
+                cached_by_repo.setdefault(name.lower(), []).append((name, None, entry))
 
         rows: list[dict[str, Any]] = []
         seen_checkpoints: set[str] = set()
@@ -214,17 +245,25 @@ class GenieX:
                 continue
             key = ckpt.lower()
             repo_key = ckpt.split(":", 1)[0].lower()
-            matched_entry = cached_by_checkpoint.get(key)
-            if matched_entry is None and repo_key in cached_by_repo:
-                # If the user pulled the repo under its default/single precision
-                ckpt_actual, matched_entry = cached_by_repo[repo_key][0]
-                ckpt = ckpt_actual
+            hit = cached_by_checkpoint.get(key)
+            if hit is None and repo_key in cached_by_repo and ":" not in ckpt:
+                hit = cached_by_repo[repo_key][0]
+            matched_entry = hit[2] if hit is not None else None
+            matched_prec = hit[1] if hit is not None else None
+            if hit is not None:
+                ckpt = hit[0]
                 key = ckpt.lower()
             seen_checkpoints.add(key)
             downloaded = matched_entry is not None
             size_gb = preset.get("size_gb")
-            if downloaded and isinstance(matched_entry.get("size"), (int, float)) and matched_entry["size"] > 0:
-                size_gb = round(float(matched_entry["size"]) / 1e9, 2)
+            if downloaded:
+                actual_gb = self._precision_size_gb(
+                    str(matched_entry.get("name") or ""),
+                    matched_prec,
+                    matched_entry.get("size"),
+                )
+                if actual_gb is not None:
+                    size_gb = actual_gb
             labels = [str(l) for l in (preset.get("labels") or ["chat"])]
             if "chat" not in labels:
                 labels.insert(0, "chat")
@@ -241,18 +280,16 @@ class GenieX:
                 }
             )
 
-        # Include any additional models already downloaded via geniex CLI outside models.json
-        for ckpt_lower, entry in cached_by_checkpoint.items():
+        # Include every remaining cached repo/precision discovered via geniex CLI or local exports
+        for ckpt_lower, (ckpt, prec, entry) in cached_by_checkpoint.items():
             if ckpt_lower in seen_checkpoints:
                 continue
-            name = str(entry.get("name") or "").strip()
-            precs = entry.get("precisions") or []
-            ckpt = f"{name}:{precs[0]}" if isinstance(precs, list) and precs else name
-            if ckpt.lower() in seen_checkpoints:
-                continue
-            seen_checkpoints.add(ckpt.lower())
-            size_bytes = entry.get("size")
-            size_gb = round(float(size_bytes) / 1e9, 2) if isinstance(size_bytes, (int, float)) and size_bytes > 0 else None
+            seen_checkpoints.add(ckpt_lower)
+            size_gb = self._precision_size_gb(
+                str(entry.get("name") or ""),
+                prec,
+                entry.get("size"),
+            )
             mtype = str(entry.get("type") or "llm").lower()
             labels = ["chat", "vision"] if mtype == "vlm" else ["chat", "tool-calling"]
             rows.append(
@@ -705,7 +742,13 @@ def make_handler(
                         payload["model"] = tag
                         is_stream = bool(payload.get("stream"))
                         if "think" in payload:
-                            payload["enable_think"] = bool(payload.pop("think"))
+                            think_flag = bool(payload.pop("think"))
+                            payload["enable_think"] = think_flag
+                            kwargs = payload.get("chat_template_kwargs")
+                            if not isinstance(kwargs, dict):
+                                kwargs = {}
+                                payload["chat_template_kwargs"] = kwargs
+                            kwargs.setdefault("enable_thinking", think_flag)
                         raw = json.dumps(payload).encode("utf-8")
                 except ValueError:
                     pass

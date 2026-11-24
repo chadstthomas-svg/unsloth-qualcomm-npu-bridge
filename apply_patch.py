@@ -61,6 +61,7 @@ TARGETS = (
 RUNTIME_FILES = (
     "runtime_hook.py",
     "geniex_host.py",
+    "convert_to_hexagon.py",
     "models.json",
     "apply_patch.py",
     "test_bridge.py",

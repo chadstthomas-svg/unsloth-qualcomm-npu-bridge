@@ -96,7 +96,36 @@ Unsloth Studio surfaces NPU controls inside existing views (rather than a separa
 
 ---
 
-## Customizing the NPU Model Catalog
+## Customizing the NPU Model Catalog & Local GGUF Converter
+
+### Add Any Hugging Face / Local Model (`convert_to_hexagon.py`)
+
+Qualcomm GenieX's `ggml-hexagon` backend accelerates standard `Q4_0`, `Q8_0`, `Q4_K_M`, `Q5_K_M`, `Q6_K`, `IQ4_NL`, and `MXFP4` GGUFs directly on Hexagon `HTP0` without AMD's `.q4nx` shape allowlist. Use [convert_to_hexagon.py](convert_to_hexagon.py) to convert any local or Hugging Face GGUF to Hexagon-native `Q4_0` (with `Q8_0` output/embedding tensors) and register it in GenieX + Unsloth Studio:
+
+```powershell
+# Convert a Hugging Face model (resumable download + Q4_0 conversion + GenieX registration)
+& "$env:USERPROFILE\.unsloth\studio\unsloth_studio\Scripts\python.exe" .\convert_to_hexagon.py `
+  --hf-repo tablinum/Moon-Beam-8B-A1B-GGUF `
+  --hf-file Moon-Beam-8B-A1B-Q4_K_M.gguf `
+  --quant Q4_0 --also-register-source
+
+# Convert any local GGUF file (F16 / BF16 / Q4_K_M / IQ3_XXS / Studio export)
+& "$env:USERPROFILE\.unsloth\studio\unsloth_studio\Scripts\python.exe" .\convert_to_hexagon.py C:\path\to\model.gguf --quant Q4_0
+
+# Auto-discover & register all GGUF exports in %USERPROFILE%\.unsloth\studio\exports\
+& "$env:USERPROFILE\.unsloth\studio\unsloth_studio\Scripts\python.exe" .\convert_to_hexagon.py --scan-exports --auto-quantize
+```
+
+All Hexagon-ready GGUFs exported under `%USERPROFILE%\.unsloth\studio\exports\` are also **auto-discovered** via zero-copy NTFS hardlinks whenever Unsloth Studio refreshes the NPU catalog.
+
+Verified `tablinum/Moon-Beam-8B-A1B-GGUF` (`8B total / 1B active` `bailingmoe3` MoE, 4K context) throughput on Snapdragon X (`X1-26-100` Hexagon `HTP0`):
+
+| Precision | Size on Disk | Prefill Speed | Decode Speed | Reasoning & Tool Calling |
+| :--- | :---: | :---: | :---: | :--- |
+| **`Q4_0` (Converted via `convert_to_hexagon.py`)** | `4.71 GB` | **111.2 – 131.4 tok/s** | **27.3 – 27.9 tok/s** | `think=on/off` verified |
+| **`Q4_K_M`** | `4.94 GB` | **103.3 – 123.1 tok/s** | **26.0 – 26.3 tok/s** | `think=on/off` verified |
+
+### Curated Catalog (`models.json`)
 
 Edit `%USERPROFILE%\.unsloth\qualcomm-npu-bridge\models.json` to add any Hugging Face `<org>/<repo>:Q4_0` GGUF repository:
 

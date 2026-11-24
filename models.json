@@ -57,6 +57,20 @@
       "size_gb": 2.37,
       "max_context_window": 32768,
       "labels": ["chat"]
+    },
+    {
+      "checkpoint": "tablinum/Moon-Beam-8B-A1B-GGUF:Q4_0",
+      "hf_repo": "tablinum/Moon-Beam-8B-A1B-NPU",
+      "size_gb": 4.8,
+      "max_context_window": 32768,
+      "labels": ["chat", "reasoning", "tool-calling"]
+    },
+    {
+      "checkpoint": "tablinum/Moon-Beam-8B-A1B-GGUF:Q4_K_M",
+      "hf_repo": "tablinum/Moon-Beam-8B-A1B-Q4KM-NPU",
+      "size_gb": 4.94,
+      "max_context_window": 32768,
+      "labels": ["chat", "reasoning", "tool-calling"]
     }
   ]
 }

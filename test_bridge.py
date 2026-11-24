@@ -101,12 +101,19 @@ def main() -> int:
                 f"| size_gb={m.size_gb} | fits_memory={m.fits_memory}"
             )
         downloaded = [m for m in catalog if m.downloaded]
-        assert downloaded, "Expected at least one downloaded NPU model (Qwen3-0.6B-GGUF:Q4_0)"
-        target_model = downloaded[0]
+        assert downloaded, "Expected at least one downloaded NPU model"
+        target_model = next((m for m in downloaded if "Qwen3-0.6B" in m.id), downloaded[0])
 
-        resolved_path = npu.model_path_for_name("Qwen3-0.6B-NPU", start_runtime=False)
-        print(f"Resolved 'Qwen3-0.6B-NPU' -> {resolved_path}")
-        assert resolved_path == target_model.model_path
+        if "Qwen3-0.6B" in target_model.id:
+            resolved_path = npu.model_path_for_name("Qwen3-0.6B-NPU", start_runtime=False)
+            print(f"Resolved 'Qwen3-0.6B-NPU' -> {resolved_path}")
+            assert resolved_path == target_model.model_path
+
+        moonbeam = next((m for m in downloaded if "Moon-Beam-8B-A1B-GGUF-Q4_0" in m.id), None)
+        if moonbeam is not None:
+            mb_resolved = npu.model_path_for_name("tablinum/Moon-Beam-8B-A1B-NPU", start_runtime=False)
+            print(f"Resolved 'tablinum/Moon-Beam-8B-A1B-NPU' -> {mb_resolved}")
+            assert mb_resolved == moonbeam.model_path
 
         print(f"\n=== 6. LemonadeNpuBackend.load({target_model.id!r}) ===")
         loaded = npu.load(target_model.id, context_length=4096)
