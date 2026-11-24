@@ -2,6 +2,8 @@
 
 Brings **Qualcomm Hexagon NPU (`HTP0`)** acceleration to **Unsloth Studio** on Windows 11 ARM64 Copilot+ PCs (`Snapdragon X`, `Snapdragon X Plus`, `Snapdragon X Elite`), mirroring Unsloth Studio's AMD Ryzen AI XDNA 2 NPU architecture.
 
+> **Upstream Pull Request:** [`unslothai/unsloth#19316`](https://github.com/unslothai/unsloth/pull/19316)
+
 ## Highlights
 
 - **Native Unsloth Studio NPU Tab Integration:** Unlocks Unsloth Studio's built-in **NPU** runtime tab, one-click model downloads, Load/Unload lifecycle (automatically freeing `llama-server` RAM on 16 GB devices), Chat, tool calling, reasoning controls, and OpenAI-compatible `/v1/chat/completions` endpoint.
