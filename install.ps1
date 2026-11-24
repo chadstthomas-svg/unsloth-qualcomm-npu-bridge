@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== Unsloth Studio - Qualcomm Hexagon NPU Bridge Installer ===" -ForegroundColor Cyan
+Write-Host "=== Unsloth Studio - Qualcomm Hexagon NPU Bridge Installer (Update-Proof .pth Shim) ===" -ForegroundColor Cyan
 
 $studioPy = Join-Path $env:USERPROFILE ".unsloth\studio\unsloth_studio\Scripts\python.exe"
 if ($env:UNSLOTH_STUDIO_HOME) {
@@ -27,9 +27,12 @@ if (-not $geniexCandidates) {
     Write-Host "[1/2] Qualcomm GenieX CLI found at $($geniexCandidates[0])" -ForegroundColor Green
 }
 
-Write-Host "[2/2] Applying Qualcomm Hexagon NPU bridge to Unsloth Studio..." -ForegroundColor Yellow
+Write-Host "[2/2] Installing zero-modification, update-proof .pth runtime shim..." -ForegroundColor Yellow
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 & $studioPy (Join-Path $scriptDir "apply_patch.py") --apply
 & $studioPy (Join-Path $scriptDir "apply_patch.py") --status
 
-Write-Host "`nDone! Restart Unsloth Studio to use your Qualcomm Hexagon NPU." -ForegroundColor Green
+Write-Host "`nDone! Studio files remain 100% stock and survive future Unsloth Studio updates." -ForegroundColor Green
+Write-Host "Restart Unsloth Studio, then find NPU models in:" -ForegroundColor Cyan
+Write-Host "  1. Model Hub -> Format dropdown -> NPU" -ForegroundColor White
+Write-Host "  2. Chat -> Model Picker -> NPU format filter" -ForegroundColor White

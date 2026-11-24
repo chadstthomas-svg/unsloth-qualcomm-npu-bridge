@@ -25,9 +25,32 @@ for p in (str(STUDIO_BACKEND), str(STUDIO_PKG)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+STOCK_TARGETS = (
+    "backend/utils/hardware/npu.py",
+    "install_lemonade_prebuilt.py",
+    "backend/core/inference/npu_backend.py",
+    "backend/utils/hardware/hardware.py",
+    "backend/utils/q4nx_export_gate.py",
+    "backend/core/inference/npu_compat.py",
+)
+LEGACY_MARKER = "# [QUALCOMM_HEXAGON_NPU_BRIDGE]"
+
 
 def main() -> int:
-    print("=== 1. Hardware Detection (detect_amd_npu) ===")
+    print("=== 0. Update-Proof .pth Runtime Hook & Clean Stock Studio Verification ===")
+    hook_mod = sys.modules.get("runtime_hook")
+    assert hook_mod is not None and hook_mod.is_installed(), (
+        "Expected runtime_hook to be auto-installed via Lib/site-packages/unsloth_qualcomm_npu_bridge.pth"
+    )
+    print(f"runtime_hook loaded from: {hook_mod.__file__} (is_installed=True)")
+    for rel in STOCK_TARGETS:
+        p = STUDIO_PKG / rel
+        assert p.is_file(), f"Missing Studio file: {p}"
+        txt = p.read_text(encoding="utf-8", errors="replace")
+        assert LEGACY_MARKER not in txt, f"Found legacy inline patch marker in {p}"
+    print("All 6 target Unsloth Studio source files verified clean stock (0 inline edits).")
+
+    print("\n=== 1. Hardware Detection (detect_amd_npu) ===")
     from utils.hardware.npu import detect_amd_npu
 
     hw = detect_amd_npu()
