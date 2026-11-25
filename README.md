@@ -60,6 +60,19 @@ Measured on the same **Snapdragon X (`X1-26-100`, 16 GB)** running **`Moon-Beam-
 
 </details>
 
+![Annual Battery Wear and Pegged-CPU Time for Continuous Battery Throughput](assets/npu-battery-cycles-cpu-time.png)
+
+<details>
+<summary>Read the annual battery-cycle &amp; pegged-CPU time breakdown (9:1 continuous battery throughput)</summary>
+
+| Continuous Battery Scenario (`60 Wh` pack, 9:1 mix) | NPU (`balanced`) Output | CPU Output (Same Charges) | NPU Token Gain | Extra 60 Wh Charges CPU Needs for That Gain | Extra Pegged-CPU Time (`~99%` CPU / `18.1 W`) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **1/2 Charge / Workday** (`125` charges/yr) | `588.8M` tok | `157.5M` tok | `+431.2M` tok | **`+342` extra charges** (`467` total) | **`+697` hrs/yr** (`952h` total · `~87` extra `8h` days) |
+| **1 Charge / Workday** (`250` charges/yr) | `1.18B` tok | `315.1M` tok | `+862.4M` tok | **`+684` extra charges** (`934` total) | **`+1,394` hrs/yr** (`1,904h` total · `~174` extra `8h` days) |
+| **24/7/365 Continuous** (`8,760 hrs/yr` on NPU) | `4.36B` tok (`926` charges) | — *(equal-token CPU match)* | — | **`+2,535` extra charges** (`3,461` total · `9.5`/day) | **`7,053` hrs/yr** (`294` full `24h` days at `~99%` CPU) |
+
+</details>
+
 ---
 
 ## Highlights
