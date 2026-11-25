@@ -2,13 +2,32 @@
 
 Brings **Qualcomm Hexagon NPU (`HTP0`)** acceleration to **Unsloth Studio** on Windows 11 ARM64 Copilot+ PCs (`Snapdragon X`, `Snapdragon X Plus`, `Snapdragon X Elite`), mirroring Unsloth Studio's AMD Ryzen AI XDNA 2 NPU architecture.
 
-> **Upstream Pull Request:** [`unslothai/unsloth#19316`](https://github.com/unslothai/unsloth/pull/19316)
+> **Upstream Pull Request:** [`unslothai/unsloth#19316`](https://github.com/unslothai/unsloth/pull/19316) · **Flagship NPU Model Release:** [`tablinum/Moon-Beam-8B-A1B-NPU`](https://huggingface.co/tablinum/Moon-Beam-8B-A1B-NPU)
+
+![Annual AI Power User Impact — Dollars Saved & Extra Tokens per Year](assets/npu-annual-impact.png)
+
+<details>
+<summary>Annual Power-User Savings Breakdown (250 workdays/yr · 30 Wh/day battery budget · Measured Snapdragon X rails)</summary>
+
+Assumes an AI power user spending **half a 60 Wh battery charge per workday (`30 Wh/day` × `250 workdays` = `7.50 kWh/yr`)** with a **9:1 RAG/coding/chat token mix (`2,700` input / `300` output)** on **`tablinum/Moon-Beam-8B-A1B-NPU:Q4_0`** (`4.71 GB`):
+
+| Backend / Mode | Annual Tokens (`30 Wh/day`) | Multiplier vs CPU | Energy for Equal `589M` Tokens | Wall Power (`$0.17/kWh`) | Cloud Equivalent (`529.9M` in / `58.9M` out) |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **Without NPU (CPU)** | `158M` | `1.00×` | `28.03 kWh` (`467` cycles) | `$4.76 / yr` | — |
+| **With NPU (`burst`)** | `410M` | `2.60×` | `10.78 kWh` (`180` cycles) | `$1.83 / yr` | — |
+| **With NPU (`balanced`)** | **`589M`** (**`+431M`**) | **`3.74×`** | **`7.50 kWh`** (**`-73.2%` · `342` fewer cycles**) | **`$1.27 / yr`** | Saves **`$239/yr`** vs `$20/mo` Pro · **`$764/yr`** vs `$1/$4` API · **`$2,472/yr`** vs `$3/$15` frontier API |
+
+</details>
 
 ---
 
 ## Benchmarks: Before vs After (Qualcomm Hexagon NPU Bridge)
 
+### Dense Model (`unsloth/Qwen3-0.6B-GGUF:Q4_0`)
+
 Measured on a **Snapdragon X (`X1-26-100`, 45 TOPS Qualcomm Hexagon NPU, 16 GB LPDDR5x, Windows 11 ARM64 Build 26300)** running **`unsloth/Qwen3-0.6B-GGUF:Q4_0`** (same GGUF file, `4096` context, `max_tokens=96`, `temperature=0.0`, averaged over 3 uncached runs):
+
+![Qwen3-0.6B Q4_0 Dense Model Speedup on Hexagon NPU](assets/npu-dense-speedup.png)
 
 ![Before vs After Benchmark — Qualcomm Hexagon NPU Bridge](assets/benchmark.svg)
 
@@ -20,6 +39,26 @@ Measured on a **Snapdragon X (`X1-26-100`, 45 TOPS Qualcomm Hexagon NPU, 16 GB L
 
 > **Why is 0.6B decode faster on CPU while prefill/TTFT & host CPU win big on NPU?**  
 > On tiny `0.6B` weights (`~382 MB`), CPU decode is L2/SLC cache-resident and avoids DSP/HTP RPC synchronization overhead per token, whereas compute-bound prompt ingestion scales strongly on the Hexagon tensor cores (`2.08×–2.62×` faster prefill and `2.66×` lower Time-To-First-Token at `~1,780` tokens) while freeing **~68 percentage points of host CPU** so your laptop stays responsive and cool.
+
+### 8B MoE Model ([`tablinum/Moon-Beam-8B-A1B-NPU`](https://huggingface.co/tablinum/Moon-Beam-8B-A1B-NPU) · `Q4_0`, 8B Total / 1B Active)
+
+Measured on the same **Snapdragon X (`X1-26-100`, 16 GB)** running **`Moon-Beam-8B-A1B-Q4_0.gguf`** (`4.71 GB` converted cleanly with `convert_to_hexagon.py --quant Q4_0`) across speed, host CPU offload, and live Windows `\Energy Meter(SYS)` + `CPU_CLUSTER_0/1` power rails (`60 Wh` design / `58.77 Wh` full-charge battery):
+
+![Moon-Beam 8B A1B CPU vs Hexagon NPU Benchmark](assets/npu-vs-cpu-moonbeam.png)
+
+![Moon-Beam 8B A1B Power Draw and Tokens per 60 Wh Charge](assets/npu-tokens-per-charge.png)
+
+<details>
+<summary>Read Moon-Beam 8B A1B power & 60 Wh tokens-per-charge measurements as text (2,711-tok prefill / 320-tok decode)</summary>
+
+| Mode | Prefill Speed & Power | Prefill / `60 Wh` Charge | Decode Speed & Power | Decode / `60 Wh` Charge | Continuous Runtime |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Idle Baseline** | — | — | `3.71 W` (`0.45 W` CPU) | — | `16.17 hrs` |
+| **Without NPU (CPU)** | `222.8 tok/s` @ `31.81 W` (`20.46 W` CPU) | `1.51M` | `56.1 tok/s` @ `24.07 W` (`12.77 W` CPU) | `503.6k` | `1.89h` prefill · `2.49h` decode |
+| **With NPU (`burst`)** | **`290.2 tok/s`** @ `10.39 W` (`3.02 W` CPU) | `6.03M` (**`3.99×`**) | `27.8 tok/s` @ `9.36 W` (`1.84 W` CPU) | `641.4k` (**`+27%`**) | `5.78h` prefill · `6.41h` decode |
+| **With NPU (`balanced`)** | `276.9 tok/s` @ **`5.96 W`** (`0.43 W` CPU) | **`10.02M`** (**`6.63×`**) | `25.1 tok/s` @ **`6.65 W`** (`0.42 W` CPU) | **`816.1k`** (**`+62%`**) | **`10.06h`** prefill · **`9.02h`** decode |
+
+</details>
 
 ---
 
@@ -34,6 +73,8 @@ Measured on a **Snapdragon X (`X1-26-100`, 45 TOPS Qualcomm Hexagon NPU, 16 GB L
 ---
 
 ## Architecture
+
+![Qualcomm Hexagon NPU Bridge Architecture](assets/npu-bridge-architecture.png)
 
 ```mermaid
 flowchart LR
