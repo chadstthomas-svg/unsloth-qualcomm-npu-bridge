@@ -109,7 +109,7 @@ def main() -> int:
             print(f"Resolved 'Qwen3-0.6B-NPU' -> {resolved_path}")
             assert resolved_path == target_model.model_path
 
-        moonbeam = next((m for m in downloaded if "Moon-Beam-8B-A1B-GGUF-Q4_0" in m.id), None)
+        moonbeam = next((m for m in downloaded if "Moon-Beam-8B-A1B-NPU-Q4_0" in m.id), None)
         if moonbeam is not None:
             mb_resolved = npu.model_path_for_name("tablinum/Moon-Beam-8B-A1B-NPU", start_runtime=False)
             print(f"Resolved 'tablinum/Moon-Beam-8B-A1B-NPU' -> {mb_resolved}")
