@@ -59,9 +59,9 @@
       "labels": ["chat"]
     },
     {
-      "checkpoint": "tablinum/Moon-Beam-8B-A1B-GGUF:Q4_0",
+      "checkpoint": "tablinum/Moon-Beam-8B-A1B-NPU:Q4_0",
       "hf_repo": "tablinum/Moon-Beam-8B-A1B-NPU",
-      "size_gb": 4.8,
+      "size_gb": 4.71,
       "max_context_window": 32768,
       "labels": ["chat", "reasoning", "tool-calling"]
     },

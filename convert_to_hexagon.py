@@ -44,7 +44,7 @@ HEXAGON_NATIVE_QUANTS = (
     "IQ4_NL",
     "MXFP4",
 )
-_NO_REQUANTIZE_SOURCES = frozenset({"F32", "F16", "BF16", "Q8_0"})
+_NO_REQUANTIZE_SOURCES = frozenset({"F32", "F16", "BF16"})
 _QUANT_TAG_RE = re.compile(
     r"(?:^|[-_.])(BF16|F16|F32|Q8_0|Q6_K|Q5_K_[SML]|Q4_K_[SML]|Q4_1|Q4_0|Q3_K_[SML]|Q2_K_S|Q2_K|IQ4_XS|IQ4_NL|IQ3_XXS|IQ3_XS|IQ3_[SM]|IQ2_XXS|IQ2_XS|IQ2_[SM]|IQ1_XXS|IQ1_XS|IQ1_[SM]|MXFP4)(?:[-_.]|$)",
     re.IGNORECASE,
