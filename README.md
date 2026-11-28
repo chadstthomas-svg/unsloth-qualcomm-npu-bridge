@@ -73,12 +73,35 @@ Measured on the same **Snapdragon X (`X1-26-100`, 16 GB)** running **`Moon-Beam-
 
 </details>
 
+### 9B Dense In-RAM (`Ornith-1.5-9B-NPU`) vs 26B Sparse MoE Hybrid NPU + SSD Offload (`Gemma-4-26B-A4B-it-NPU`)
+
+Testing whether a **26B Sparse MoE (`4B` active, `13.61 GB` `UD-IQ4_NL`, `hybrid_npu_ssd` via read-only NVMe `mmap`)** beats a **9B Dense model (`6.21 GB` `Q4_0`, 100% `in_ram_npu --ngl -1`)** on a **16 GB Snapdragon X (`X1-26-100`)**:
+
+![Ornith-1.5-9B In-RAM NPU vs Gemma-4-26B-A4B Hybrid NPU + SSD Offload](assets/ornith-vs-gemma4-npu.png)
+
+<details>
+<summary>Read the full 6-dimension head-to-head numbers (live Energy Meter rails · 512-tok temp=0.0 blind quality suite)</summary>
+
+Idle baseline before test: `8.17 W` (`1.58 W` CPU). All runs use `4096` context, `temperature=0.0`, and `think=false` (`GGML_HEXAGON_RT_REPACK=0`, `LLAMA_ARG_REPACK=0` for `Gemma-4-26B`).
+
+| Model & Tier | Warm-Load | Short Prefill (~40 tok) | Long Prefill (~1.4K tok) | Sustained Decode (192 tok) | 60 Wh `9:1` Mixed Tokens/Charge | 6-Task Blind Quality |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`Ornith-1.5-9B-NPU:Q4_0`** (`6.21 GB`, `in_ram_npu --ngl -1`, `burst`) | `26.25 s` | **`151.5 tok/s`** (`297 ms`) @ `9.50 W` | **`404.4 tok/s`** (`3,585 ms`) @ `13.93 W` (`1.42 W` CPU) | **`8.64 tok/s`** @ `14.91 W` (`1.97 W` CPU) | `1.06M` | `3 / 6` |
+| **`Ornith-1.5-9B-NPU:Q4_0`** (`6.21 GB`, `in_ram_npu --ngl -1`, `balanced`) | **`24.50 s`** | `146.2 tok/s` (`308 ms`) @ **`9.35 W`** | `395.9 tok/s` (`3,663 ms`) @ **`11.62 W`** (**`0.40 W` CPU**) | `8.57 tok/s` @ **`12.37 W`** (**`0.44 W` CPU**) | **`1.27M`** (**`8.3×`**) | — |
+| **`Gemma-4-26B-A4B-it-NPU:IQ4_NL`** (`13.61 GB`, `hybrid_npu_ssd -c npu --ngl 0`, `burst`) | `246.64 s` | `2.33 tok/s` (`21,665 ms`) @ `18.37 W` | `26.32 tok/s` (`55,027 ms`) @ `26.94 W` (`14.15 W` CPU) | `5.46 tok/s` @ `26.98 W` (`14.32 W` CPU) | `0.15M` | **`5 / 6`** (`q3_logic` fail) |
+
+*(Note: `Gemma-4-26B` `balanced` mode warm-loaded in `388.64s` and timed out during generation; pinning `--ngl 22` / `--ngl 11` on `15.61 GB` physical RAM triggers paging thrashing, so the shim automatically steps down to `-c npu --ngl 0 --power-mode burst` when live free RAM is under `10.5 GB`.)*
+
+</details>
+
+**Takeaway:** `Gemma-4-26B-A4B-it` wins single-shot reasoning quality (**`5/6` vs `3/6`**), so Gemma-4 does **not** win on all accounts on a **16 GB** Snapdragon X: once a `13.61 GB` MoE exceeds usable RAM (`10.15 GB`) and streams weights from NVMe SSD, **`Ornith-1.5-9B-NPU` (`6.21 GB` in-RAM) beats it across every hardware & UX metric** — **`9.4×` faster startup**, **`73×` lower short TTFT**, **`15.4×` faster long prefill**, **`1.58×` faster decode**, **`32×` lower host CPU draw (`0.44 W`)**, and **`8.3×` more tokens per `60 Wh` charge**. Meanwhile on **`32–128 GB` Snapdragon hosts**, the same `plan_model_execution()` engine runs `26B–35B` MoEs 100% in-RAM (`--ngl -1`).
+
 ---
 
 ## Highlights
 
 - **Update-Proof Zero-Modification `.pth` Runtime Shim:** Installs a single tiny `unsloth_qualcomm_npu_bridge.pth` hook in `Lib\site-packages\` pointing to `~/.unsloth/qualcomm-npu-bridge/runtime_hook.py` (`sys.meta_path` import interceptor). All Unsloth Studio source files stay **100% stock on disk**, so in-place Studio updates (`uv pip install --upgrade unsloth`) **never overwrite or break the shim**. If upstream PR [`unslothai/unsloth#19316`](https://github.com/unslothai/unsloth/pull/19316) is merged in a future release, the hook automatically steps aside as a no-op.
-- **No Windows `TESTSIGNING` Mode Required:** Uses **Qualcomm GenieX CLI (`Qualcomm.GenieX.CLI`)** which ships **Microsoft-signed** Windows ARM64 Hexagon HTP catalogs (`ggml-hexagon.dll` + `libggml-htp-v73.so` + `libggml-htp.cat`). Secure Boot, BitLocker, Smart App Control, and anti-cheat remain untouched.
+- **No Windows `TESTSIGNING` Mode Required:** Uses **Qualcomm GenieX CLI (`Qualcomm.GenieX.CLI`)** which bundles Microsoft/Qualcomm Authenticode-signed Hexagon HTP runtime catalogs (`libggml-htp.cat`, `libqnnhtpv73.cat`, `QnnHtp.dll`), keeping Secure Boot, BitLocker, and `TESTSIGNING` untouched. *(Note: `v0.11.0`'s CLI host `geniex.exe` / `geniex.dll` itself is not yet Authenticode-signed; if Windows Smart App Control moves from Evaluation to Enforced mode and returns `0xC0E90002`, the shim surfaces that exact block message.)*
 - **Universal `8–128 GB` Auto-Scaling & Hybrid NPU + Read-Only NVMe SSD `mmap` Offload (`0 TBW`):** Automatically selects `in_ram_npu` vs `hybrid_npu_ssd` (`GGML_HEXAGON_RT_REPACK=0`, `LLAMA_ARG_REPACK=0`) so 16 GB Snapdragon laptops can stream inactive `24B–35B` MoE experts from NVMe via read-only OS page-cache `mmap` while pinning shared layers and Multi-Token Prediction (`MTP`, `--spec-type draft-mtp`) draft heads in RAM/Hexagon `HTP0`.
 - **Live-RAM Context Clamping & Self-Healing Auto-Respawn:** Dynamically clamps `--nctx` (`4096 / 8192 / 16384+`) against live `avail_ram_gb` headroom (stopping any prior child before probing), caches `/v1/models` & Studio export scans (`5s`/`15s` TTL), dynamically queries `geniex.exe --version`, and automatically respawns `geniex.exe` at stepped-down context if a child exits mid-session.
 - **Native Unsloth `Q4_0` GGUF & 26-Model Curated Catalog (`models.json`):** Runs `Moon-Beam-8B-A1B`, `Ornith-1.5-9B / 35B-A3B`, `Gemma-4 (E2B / E4B / 12B / 26B-A4B)`, `Qwen3 / 3.5 / 3.6`, `LFM2.5-24B-A2B`, `Granite-4.2`, `Phi-4-mini`, and `Llama-3.2` with `--hf-mtp-file` draft-head staging, tool calling, and reasoning controls.

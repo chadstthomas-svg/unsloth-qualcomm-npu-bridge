@@ -228,6 +228,8 @@ def main() -> int:
                 assert first["ngl"] == -1
             if row["mtp_path"]:
                 assert first["use_mtp"] is True
+            total_warm = sum(float(a.get("warm_timeout", 300.0)) for a in plan["attempts"])
+            assert total_warm <= 850.0, f"Cumulative warm_timeout {total_warm}s exceeds 850s budget"
             summaries.append(f"{row['name']}={plan['tier']}(ngl={first['ngl']},ctx={plan['ctx']})")
         print(f"  RAM={int(ram_gb):3d}GB -> " + " | ".join(summaries))
 
@@ -244,6 +246,16 @@ def main() -> int:
             f"avail={avail_gb}GB expected ctx={expected_ctx}, got {p_tight['ctx']}"
         )
     print("  10a. Tight avail_ram_gb context clamp passed: avail 5.8/8.0/11.0GB -> ctx 4096/8192/16384")
+
+    p_gemma_tight = geniex_host.plan_model_execution(
+        {"size": 13.61, "n_layers": 42, "mtp_path": "mtp.gguf"},
+        {"total_ram_gb": 15.61, "avail_ram_gb": 3.23, "disk_free_gb": 65.0},
+        requested_ctx=4096,
+    )
+    assert p_gemma_tight["tier"] == "hybrid_npu_ssd"
+    assert p_gemma_tight["attempts"][0]["ngl"] == 0
+    assert sum(float(a.get("warm_timeout", 300.0)) for a in p_gemma_tight["attempts"]) <= 850.0
+    print("  10d. Tight-live-RAM hybrid_npu_ssd direct ngl=0 & <=850s timeout budget passed")
 
     try:
         re_status = npu.enable()

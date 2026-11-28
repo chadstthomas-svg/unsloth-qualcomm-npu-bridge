@@ -48,6 +48,18 @@ _POWER_MODE_MAP = {
     "performance": "high_performance",
     "turbo": "burst",
 }
+_SAC_EXIT_CODE = 0xC0E90002
+
+
+def _format_exit_code(code: int) -> str:
+    """Format a GenieX process exit code, surfacing Smart App Control blocks clearly."""
+    if (code & 0xFFFFFFFF) == _SAC_EXIT_CODE:
+        return (
+            "Windows Smart App Control blocked unsigned geniex.exe/geniex.dll (0xC0E90002). "
+            "Check Windows Security -> App & browser control -> Smart App Control, or update "
+            "Qualcomm.GenieX.CLI once Authenticode-signed host binaries are published."
+        )
+    return f"exit code {code} (0x{code & 0xFFFFFFFF:08X})"
 
 
 def log(message: str, tag: str = "GenieXHost") -> None:
@@ -162,8 +174,9 @@ class GenieX:
         except OSError as exc:
             return 1, f"[ERROR] {exc}"
         output = (done.stdout or "") + (done.stderr or "")
-        if done.returncode and not output.strip():
-            output = f"[ERROR] exit code {done.returncode} (0x{done.returncode & 0xFFFFFFFF:08X})"
+        if done.returncode and (not output.strip() or (done.returncode & 0xFFFFFFFF) == _SAC_EXIT_CODE):
+            detail = _format_exit_code(done.returncode)
+            output = f"[ERROR] {detail}" + (f"\n{output}" if output.strip() else "")
         return done.returncode, output
 
     def version_info(self) -> tuple[int, str, Optional[str]]:
@@ -498,12 +511,12 @@ def plan_model_execution(
     if not ssd_offload:
         tier = "in_ram_npu"
         env_overrides: dict[str, str] = {}
-        attempts.append({"compute": "npu", "ngl": -1, "use_mtp": bool(mtp_path), "ctx": ctx})
+        attempts.append({"compute": "npu", "ngl": -1, "use_mtp": bool(mtp_path), "ctx": ctx, "warm_timeout": 240.0})
         if mtp_path:
-            attempts.append({"compute": "npu", "ngl": -1, "use_mtp": False, "ctx": ctx})
+            attempts.append({"compute": "npu", "ngl": -1, "use_mtp": False, "ctx": ctx, "warm_timeout": 180.0})
         if ctx > 4096:
-            attempts.append({"compute": "npu", "ngl": -1, "use_mtp": False, "ctx": 4096})
-        attempts.append({"compute": "cpu", "ngl": None, "use_mtp": False, "ctx": ctx})
+            attempts.append({"compute": "npu", "ngl": -1, "use_mtp": False, "ctx": 4096, "warm_timeout": 180.0})
+        attempts.append({"compute": "cpu", "ngl": None, "use_mtp": False, "ctx": ctx, "warm_timeout": 180.0})
     else:
         tier = "hybrid_npu_ssd"
         # Stream remaining weight rows directly from read-only mmap NVMe without anonymous repacking
@@ -511,15 +524,23 @@ def plan_model_execution(
             "GGML_HEXAGON_RT_REPACK": "0",
             "LLAMA_ARG_REPACK": "0",
         }
-        ngl = max(4, min(total_layers - 2, int((usable_npu_ram_gb * 0.72 / size_gb) * total_layers)))
-        half_ngl = max(4, ngl // 2)
-        if mtp_path:
-            attempts.append({"compute": "npu", "ngl": ngl, "use_mtp": True, "ctx": ctx})
-        attempts.append({"compute": "npu", "ngl": ngl, "use_mtp": False, "ctx": ctx})
-        if half_ngl < ngl:
-            attempts.append({"compute": "npu", "ngl": half_ngl, "use_mtp": False, "ctx": ctx})
-        attempts.append({"compute": "npu", "ngl": 0, "use_mtp": False, "ctx": ctx})
-        attempts.append({"compute": "cpu", "ngl": None, "use_mtp": False, "ctx": ctx})
+        tight_live_ram = avail_ram_gb < min(10.5, total_ram_gb * 0.68)
+        if tight_live_ram:
+            # Skip doomed high-ngl / MTP pinning probes so /v1/load hits working ngl=0 well within Studio's 900s budget
+            attempts.append({"compute": "npu", "ngl": 0, "use_mtp": False, "ctx": ctx, "warm_timeout": 540.0})
+            attempts.append({"compute": "cpu", "ngl": None, "use_mtp": False, "ctx": ctx, "warm_timeout": 240.0})
+        else:
+            ngl = max(4, min(total_layers - 2, int((usable_npu_ram_gb * 0.72 / size_gb) * total_layers)))
+            half_ngl = max(4, ngl // 2)
+            if mtp_path:
+                attempts.append({"compute": "npu", "ngl": ngl, "use_mtp": True, "ctx": ctx, "warm_timeout": 90.0})
+                attempts.append({"compute": "npu", "ngl": ngl, "use_mtp": False, "ctx": ctx, "warm_timeout": 90.0})
+            else:
+                attempts.append({"compute": "npu", "ngl": ngl, "use_mtp": False, "ctx": ctx, "warm_timeout": 100.0})
+                if half_ngl < ngl:
+                    attempts.append({"compute": "npu", "ngl": half_ngl, "use_mtp": False, "ctx": ctx, "warm_timeout": 90.0})
+            attempts.append({"compute": "npu", "ngl": 0, "use_mtp": False, "ctx": ctx, "warm_timeout": 480.0})
+            attempts.append({"compute": "cpu", "ngl": None, "use_mtp": False, "ctx": ctx, "warm_timeout": 160.0})
 
     return {
         "tier": tier,
@@ -809,6 +830,7 @@ def make_handler(
             last_error = "Failed to start GenieX."
             for idx, attempt in enumerate(plan["attempts"]):
                 attempt_ctx = int(attempt.get("ctx") or plan_ctx)
+                attempt_warm_timeout = float(attempt.get("warm_timeout") or warm_timeout)
                 port = _free_port()
                 cmd = [
                     str(geniex.binary),
@@ -826,6 +848,8 @@ def make_handler(
                     "--skip-update",
                     *flm_extra,
                 ]
+                if plan["ssd_offload"] and attempt["compute"] in ("npu", "hybrid") and "--power-mode" not in flm_extra:
+                    cmd.extend(["--power-mode", "burst"])
                 if attempt.get("ngl") is not None:
                     cmd.extend(["--ngl", str(attempt["ngl"])])
                 if attempt.get("use_mtp") and plan.get("mtp_path"):
@@ -854,17 +878,20 @@ def make_handler(
 
                 tail: list[str] = []
                 threading.Thread(target=_relay, args=(process, tail), daemon=True).start()
-                deadline = time.monotonic() + 120.0
+                deadline = time.monotonic() + 60.0
                 http_ready = False
                 early_err: Optional[str] = None
                 while time.monotonic() < deadline:
                     if process.poll() is not None:
                         time.sleep(0.1)
                         code = process.returncode
-                        reason = next(
-                            (l for l in reversed(tail) if l.strip()),
-                            f"exit code {code} (0x{code & 0xFFFFFFFF:08X})",
-                        )
+                        if (code & 0xFFFFFFFF) == _SAC_EXIT_CODE:
+                            reason = _format_exit_code(code)
+                        else:
+                            reason = next(
+                                (l for l in reversed(tail) if l.strip()),
+                                _format_exit_code(code),
+                            )
                         early_err = f"GenieX exited early: {reason}"
                         break
                     try:
@@ -893,7 +920,7 @@ def make_handler(
                             "stream": False,
                             "enable_think": False,
                         },
-                        timeout=warm_timeout,
+                        timeout=attempt_warm_timeout,
                     )
                     if warm.status_code != 200:
                         _kill_process_tree(process)
