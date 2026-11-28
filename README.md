@@ -96,6 +96,28 @@ Idle baseline before test: `8.17 W` (`1.58 W` CPU). All runs use `4096` context,
 
 **Takeaway:** `Gemma-4-26B-A4B-it` wins single-shot reasoning quality (**`5/6` vs `3/6`**), so Gemma-4 does **not** win on all accounts on a **16 GB** Snapdragon X: once a `13.61 GB` MoE exceeds usable RAM (`10.15 GB`) and streams weights from NVMe SSD, **`Ornith-1.5-9B-NPU` (`6.21 GB` in-RAM) beats it across every hardware & UX metric** — **`9.4×` faster startup**, **`73×` lower short TTFT**, **`15.4×` faster long prefill**, **`1.58×` faster decode**, **`32×` lower host CPU draw (`0.44 W`)**, and **`8.3×` more tokens per `60 Wh` charge**. Meanwhile on **`32–128 GB` Snapdragon hosts**, the same `plan_model_execution()` engine runs `26B–35B` MoEs 100% in-RAM (`--ngl -1`).
 
+### GenieX `v0.12.0` (`QAIRT 2.51`) + `GGML_HEXAGON_DMA64` / `OPFUSION` Tuning
+
+Upgrading to **Qualcomm GenieX CLI `v0.12.0`** (`QAIRT 2.51`) plus automatically enabling **`GGML_HEXAGON_DMA64=1`** and **`GGML_HEXAGON_OPFUSION=1`** on `in_ram_npu` models yields immediate MoE prefill & warm-load gains with zero decode regression:
+
+![GenieX v0.12.0 QAIRT 2.51 and HTP DMA64 OpFusion Speedup](assets/npu-v012-speculative-speedup.png)
+
+<details>
+<summary>Read the v0.11.0 vs v0.12.0 + HTP Tuning & Speculative Probe numbers (`--power-mode burst`, 4096 ctx)</summary>
+
+| Model | Configuration | Warm-Load | Long Prefill (`~1.4K` tok) | Open Prose Decode (`192` tok) | Code + JSON Refactor Decode (`220` tok) |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **`Moon-Beam-8B-A1B-NPU:Q4_0`** | `v0.11.0` (`QAIRT 2.50`) | — | `290.16 tok/s` | `27.80 tok/s` | — |
+| **`Moon-Beam-8B-A1B-NPU:Q4_0`** | `v0.12.0` (`QAIRT 2.51`) Default | `20.64 s` | `347.68 tok/s` (`+19.8%`) | `28.14 tok/s` | `27.93 tok/s` |
+| **`Moon-Beam-8B-A1B-NPU:Q4_0`** | **`v0.12.0` + `DMA64=1` & `OPFUSION=1`** | **`18.38 s`** (`-2.26 s`) | **`350.72 tok/s`** (**`+20.9%`**) | **`28.23 tok/s`** | **`28.00 tok/s`** |
+| **`Ornith-1.5-9B-NPU:Q4_0`** | `v0.11.0` (`QAIRT 2.50`) | `26.25 s` | `404.42 tok/s` | `8.64 tok/s` | — |
+| **`Ornith-1.5-9B-NPU:Q4_0`** | `v0.12.0` (`QAIRT 2.51`) Default | **`22.51 s`** (`-3.74 s`) | `406.01 tok/s` | **`8.68 tok/s`** | **`8.62 tok/s`** |
+| **`Ornith-1.5-9B-NPU:Q4_0`** | **`v0.12.0` + `DMA64=1` & `OPFUSION=1`** | `22.61 s` | **`407.51 tok/s`** | **`8.68 tok/s`** | `8.61 tok/s` |
+
+- **Zero-RAM Speculative Decoding (`--spec-type`):** `geniex_plugin.dll` currently supports `draft` / `draft-mtp` paired with a matched-vocab `--draft-model`; standalone `ngram-mod`, `ngram-cache`, and `ngram-simple` return `SDKError(-200101)` and are kept disabled by default. Power users can set `UNSLOTH_SPEC_TYPE` / `UNSLOTH_DRAFT_MODEL` / `UNSLOTH_DRAFT_TOKENS` or pass `--spec-type` / `--draft-tokens` via `flm_args` (or set `UNSLOTH_DISABLE_HEXAGON_TUNING=1` to opt out of `DMA64`/`OPFUSION`).
+
+</details>
+
 ---
 
 ## Highlights

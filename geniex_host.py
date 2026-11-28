@@ -90,7 +90,7 @@ def default_hf_repo(checkpoint: str) -> str:
 
 
 def find_geniex_binary() -> Optional[Path]:
-    """Locate geniex.exe across env override, PATH, and standard Windows install locations."""
+    """Locate geniex.exe across env override, PATH, App Paths registry, and Windows install locations."""
     env_bin = os.environ.get("UNSLOTH_GENIEX_BIN", "").strip()
     if env_bin and Path(env_bin).is_file():
         return Path(env_bin)
@@ -100,12 +100,32 @@ def find_geniex_binary() -> Optional[Path]:
     local_app_data = Path(
         os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
     )
-    candidates = [
+    prog_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    candidates: list[Path] = [
+        local_app_data / "GenieX" / "geniex.exe",
+        local_app_data / "Programs" / "GenieX" / "geniex.exe",
+        prog_files / "GenieX" / "geniex.exe",
         local_app_data / "GenieX CLI" / "geniex.exe",
         local_app_data / "Programs" / "GenieX CLI" / "geniex.exe",
         local_app_data / "Microsoft" / "WinGet" / "Links" / "geniex.exe",
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "GenieX CLI" / "geniex.exe",
+        prog_files / "GenieX CLI" / "geniex.exe",
     ]
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    with winreg.OpenKey(
+                        root, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\geniex.exe"
+                    ) as key:
+                        reg_path, _ = winreg.QueryValueEx(key, None)
+                        if isinstance(reg_path, str) and reg_path.strip():
+                            candidates.insert(0, Path(reg_path.strip()))
+                except OSError:
+                    pass
+        except ImportError:
+            pass
     for candidate in candidates:
         if candidate.is_file():
             return candidate
@@ -229,21 +249,25 @@ class GenieX:
         parts = [p for p in name.strip().replace("\\", "/").split("/") if p]
         if len(parts) >= 2:
             model_dir = self._geniex_data_dir() / "models" / Path(*parts)
-            manifest = model_dir / "geniex.json"
-            try:
-                data = json.loads(manifest.read_text(encoding="utf-8"))
-                if precision:
-                    mfile = (data.get("ModelFile") or {}).get(precision) or {}
-                    p_size = mfile.get("Size")
-                    if isinstance(p_size, (int, float)) and p_size > 0:
-                        size_gb = round(float(p_size) / 1e9, 2)
-                mtp_obj = data.get("MtpFile") or {}
-                if isinstance(mtp_obj, dict) and mtp_obj.get("Name"):
-                    cand = model_dir / str(mtp_obj["Name"])
-                    if cand.is_file() and cand.stat().st_size > 0:
-                        mtp_path = str(cand)
-            except (OSError, ValueError, TypeError):
-                pass
+            for manifest_name in ("geniex.json", "metadata.json"):
+                manifest = model_dir / manifest_name
+                if not manifest.is_file():
+                    continue
+                try:
+                    data = json.loads(manifest.read_text(encoding="utf-8"))
+                    if precision and size_gb is None:
+                        mfile = (data.get("ModelFile") or {}).get(precision) or {}
+                        p_size = mfile.get("Size")
+                        if isinstance(p_size, (int, float)) and p_size > 0:
+                            size_gb = round(float(p_size) / 1e9, 2)
+                    if mtp_path is None:
+                        mtp_obj = data.get("MtpFile") or {}
+                        if isinstance(mtp_obj, dict) and mtp_obj.get("Name"):
+                            cand = model_dir / str(mtp_obj["Name"])
+                            if cand.is_file() and cand.stat().st_size > 0:
+                                mtp_path = str(cand)
+                except (OSError, ValueError, TypeError):
+                    pass
             if mtp_path is None and model_dir.is_dir():
                 for cand in sorted(model_dir.glob("mtp-*.gguf")):
                     if cand.is_file() and cand.stat().st_size > 0:
@@ -484,7 +508,8 @@ def plan_model_execution(
     total_layers = max(8, int(row.get("n_layers") or 40))
     headroom_gb = avail_ram_gb - size_gb - 1.2
 
-    disable_mtp = os.environ.get("UNSLOTH_DISABLE_MTP", "").strip() in ("1", "true", "yes")
+    disable_mtp = os.environ.get("UNSLOTH_DISABLE_MTP", "").strip().lower() in ("1", "true", "yes")
+    disable_htp_tuning = os.environ.get("UNSLOTH_DISABLE_HEXAGON_TUNING", "").strip().lower() in ("1", "true", "yes")
     mtp_path = None if disable_mtp else (row.get("mtp_path") or None)
 
     ssd_offload = size_gb > usable_npu_ram_gb
@@ -510,7 +535,12 @@ def plan_model_execution(
     attempts: list[dict[str, Any]] = []
     if not ssd_offload:
         tier = "in_ram_npu"
-        env_overrides: dict[str, str] = {}
+        # GenieX v0.12.0+ (QAIRT 2.51): DMA64 + OPFUSION trimmed Moon-Beam warm-load 2.26s & lifted prefill
+        env_overrides = (
+            {}
+            if disable_htp_tuning
+            else {"GGML_HEXAGON_DMA64": "1", "GGML_HEXAGON_OPFUSION": "1"}
+        )
         attempts.append({"compute": "npu", "ngl": -1, "use_mtp": bool(mtp_path), "ctx": ctx, "warm_timeout": 240.0})
         if mtp_path:
             attempts.append({"compute": "npu", "ngl": -1, "use_mtp": False, "ctx": ctx, "warm_timeout": 180.0})
@@ -575,7 +605,7 @@ def _relay(process: subprocess.Popen, tail: list[str]) -> None:
 
 
 def _translate_flm_args(flm_args: Optional[str]) -> list[str]:
-    """Translate Studio's FLM flags (--pmode, etc.) to GenieX serve CLI flags."""
+    """Translate Studio's FLM flags (--pmode, speculative flags, etc.) to GenieX serve CLI flags."""
     if not isinstance(flm_args, str) or not flm_args.strip():
         return []
     tokens = flm_args.split()
@@ -587,6 +617,10 @@ def _translate_flm_args(flm_args: Optional[str]) -> list[str]:
             mapped = _POWER_MODE_MAP.get(tokens[i + 1].strip().lower())
             if mapped:
                 out.extend(["--power-mode", mapped])
+            i += 2
+            continue
+        if tok in ("--spec-type", "--draft-model", "--draft-tokens", "--draft-min", "--draft-p-min") and i + 1 < len(tokens):
+            out.extend([tok, tokens[i + 1]])
             i += 2
             continue
         if tok in ("--prefill-chunk-len", "--img-pre-resize") and i + 1 < len(tokens):
@@ -823,9 +857,14 @@ def make_handler(
             profile = detect_system_profile(geniex._geniex_data_dir())
             plan = plan_model_execution(row, profile, requested_ctx=eff_req_ctx)
             plan_ctx = int(plan["ctx"])
-            child_env = {**os.environ, **plan["env_overrides"]}
+            # Explicit user env vars always take precedence over default plan tuning overrides
+            child_env = {**plan["env_overrides"], **os.environ}
             warm_timeout = 420.0 if plan["ssd_offload"] else 300.0
             flm_extra = _translate_flm_args(flm_args)
+            disable_spec = os.environ.get("UNSLOTH_DISABLE_SPEC", "").strip().lower() in ("1", "true", "yes")
+            env_spec_type = "" if disable_spec else os.environ.get("UNSLOTH_SPEC_TYPE", "").strip()
+            env_draft_model = os.environ.get("UNSLOTH_DRAFT_MODEL", "").strip()
+            env_draft_tokens = os.environ.get("UNSLOTH_DRAFT_TOKENS", "").strip()
 
             last_error = "Failed to start GenieX."
             for idx, attempt in enumerate(plan["attempts"]):
@@ -854,6 +893,12 @@ def make_handler(
                     cmd.extend(["--ngl", str(attempt["ngl"])])
                 if attempt.get("use_mtp") and plan.get("mtp_path"):
                     cmd.extend(["--spec-type", "draft-mtp", "--draft-model", str(plan["mtp_path"])])
+                elif env_spec_type and "--spec-type" not in flm_extra and attempt["compute"] == "npu":
+                    cmd.extend(["--spec-type", env_spec_type])
+                    if env_draft_model and "--draft-model" not in flm_extra:
+                        cmd.extend(["--draft-model", env_draft_model])
+                    if env_draft_tokens and "--draft-tokens" not in flm_extra:
+                        cmd.extend(["--draft-tokens", env_draft_tokens])
 
                 log(
                     f"Starting [{plan['tier']}] attempt {idx + 1}/{len(plan['attempts'])} "

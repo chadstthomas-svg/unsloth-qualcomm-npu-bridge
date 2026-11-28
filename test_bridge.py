@@ -252,10 +252,24 @@ def main() -> int:
         {"total_ram_gb": 15.61, "avail_ram_gb": 3.23, "disk_free_gb": 65.0},
         requested_ctx=4096,
     )
-    assert p_gemma_tight["tier"] == "hybrid_npu_ssd"
-    assert p_gemma_tight["attempts"][0]["ngl"] == 0
+    assert p_gemma_tight["tier"] == "hybrid_npu_ssd" and p_gemma_tight["attempts"][0]["ngl"] == 0
     assert sum(float(a.get("warm_timeout", 300.0)) for a in p_gemma_tight["attempts"]) <= 850.0
-    print("  10d. Tight-live-RAM hybrid_npu_ssd direct ngl=0 & <=850s timeout budget passed")
+    p_inram_tune = geniex_host.plan_model_execution(
+        moonbeam_row,
+        {"total_ram_gb": 15.61, "avail_ram_gb": 9.0, "disk_free_gb": 50.0},
+        requested_ctx=4096,
+    )
+    assert p_inram_tune["env_overrides"].get("GGML_HEXAGON_DMA64") == "1"
+    assert p_inram_tune["env_overrides"].get("GGML_HEXAGON_OPFUSION") == "1"
+    assert geniex_host._translate_flm_args("--pmode turbo --spec-type draft-mtp --draft-tokens 4") == [
+        "--power-mode",
+        "burst",
+        "--spec-type",
+        "draft-mtp",
+        "--draft-tokens",
+        "4",
+    ]
+    print("  10d. Tight-RAM hybrid_npu_ssd, HTP DMA64/OPFUSION tuning & spec pass-through checks passed")
 
     try:
         re_status = npu.enable()

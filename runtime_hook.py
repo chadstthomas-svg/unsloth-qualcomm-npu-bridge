@@ -106,7 +106,7 @@ def _windows_qualcomm_probe() -> dict[str, Any]:
 
 
 def _find_geniex_binary() -> Optional[Path]:
-    """Locate `geniex.exe` across env override, PATH, and standard Windows install paths."""
+    """Locate `geniex.exe` across env override, PATH, App Paths registry, and Windows install paths."""
     env_bin = os.environ.get("UNSLOTH_GENIEX_BIN", "").strip()
     if env_bin and Path(env_bin).is_file():
         return Path(env_bin)
@@ -114,12 +114,32 @@ def _find_geniex_binary() -> Optional[Path]:
     if which_bin and Path(which_bin).is_file():
         return Path(which_bin)
     local_app_data = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
-    candidates = (
+    prog_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    candidates: list[Path] = [
+        local_app_data / "GenieX" / "geniex.exe",
+        local_app_data / "Programs" / "GenieX" / "geniex.exe",
+        prog_files / "GenieX" / "geniex.exe",
         local_app_data / "GenieX CLI" / "geniex.exe",
         local_app_data / "Programs" / "GenieX CLI" / "geniex.exe",
         local_app_data / "Microsoft" / "WinGet" / "Links" / "geniex.exe",
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "GenieX CLI" / "geniex.exe",
-    )
+        prog_files / "GenieX CLI" / "geniex.exe",
+    ]
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    with winreg.OpenKey(
+                        root, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\geniex.exe"
+                    ) as key:
+                        reg_path, _ = winreg.QueryValueEx(key, None)
+                        if isinstance(reg_path, str) and reg_path.strip():
+                            candidates.insert(0, Path(reg_path.strip()))
+                except OSError:
+                    pass
+        except ImportError:
+            pass
     for candidate in candidates:
         if candidate.is_file():
             return candidate
