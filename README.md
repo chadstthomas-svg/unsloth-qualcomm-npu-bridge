@@ -114,7 +114,31 @@ Upgrading to **Qualcomm GenieX CLI `v0.12.0`** (`QAIRT 2.51`) plus automatically
 | **`Ornith-1.5-9B-NPU:Q4_0`** | `v0.12.0` (`QAIRT 2.51`) Default | **`22.51 s`** (`-3.74 s`) | `406.01 tok/s` | **`8.68 tok/s`** | **`8.62 tok/s`** |
 | **`Ornith-1.5-9B-NPU:Q4_0`** | **`v0.12.0` + `DMA64=1` & `OPFUSION=1`** | `22.61 s` | **`407.51 tok/s`** | **`8.68 tok/s`** | `8.61 tok/s` |
 
-- **Zero-RAM Speculative Decoding (`--spec-type`):** `geniex_plugin.dll` currently supports `draft` / `draft-mtp` paired with a matched-vocab `--draft-model`; standalone `ngram-mod`, `ngram-cache`, and `ngram-simple` return `SDKError(-200101)` and are kept disabled by default. Power users can set `UNSLOTH_SPEC_TYPE` / `UNSLOTH_DRAFT_MODEL` / `UNSLOTH_DRAFT_TOKENS` or pass `--spec-type` / `--draft-tokens` via `flm_args` (or set `UNSLOTH_DISABLE_HEXAGON_TUNING=1` to opt out of `DMA64`/`OPFUSION`).
+- **Zero-RAM Speculative Decoding (`--spec-type`):** Standard transformers (`Qwen3-0.6B/4B`) support all `ngram-*` modes (`Qwen3-0.6B` hits **`126.8 tok/s`** at `93%` acceptance with `ngram-cache`, `Qwen3-4B` hits **`17.48 tok/s`** with `ngram-mod`), whereas hybrid SSM models (`Moon-Beam`, `Ornith`) fail batch rollback under `ngram-cache` (`SDKError -200101`) unless using `--spec-type ngram-mod --draft-min 1`. Power users can set `UNSLOTH_SPEC_TYPE` / `UNSLOTH_DRAFT_MODEL` / `UNSLOTH_DRAFT_TOKENS` / `UNSLOTH_DRAFT_MIN` or pass `--spec-type` / `--draft-tokens` via `flm_args` (or `UNSLOTH_DISABLE_HEXAGON_TUNING=1` to opt out).
+
+</details>
+
+### Silicon Roofline & Max-Throughput Investigation (`Snapdragon X X1-26-100` · Hexagon `v73`)
+
+Systematic 6-phase audit across all 29 `ggml-hexagon.dll` environment knobs, multi-session `HTP0,HTP1`, Adreno `X1-45` OpenCL, 8-core Oryon CPU, speculative decoding, QAIRT ahead-of-time (`W4A16`) context binaries, and `llama.cpp b12833` concurrency on this `16 GB` `LPDDR5x-8448` (`135 GB/s` peak) system (`NVMe FSB0C256G-F9Y0900` `0.48 GB/s` unbuffered sequential read):
+
+![Snapdragon X X1-26-100 Max Throughput Roofline & Ablations](assets/npu-max-throughput-roofline.png)
+
+<details>
+<summary>Key Findings & Measured Tuning Matrix (Wired Safely Into Bridge)</summary>
+
+1. **Silicon Role Split (NPU Owns Prefill; CPU Owns MoE Decode):**
+   - On **`Ornith-1.5-9B-NPU:Q4_0` (`qwen35`)**, Hexagon NPU (`4746 MiB` `HTP0` + `1031 MiB` `HTP0-HOST`, `1435 MHz`, `0` CPU fallbacks) hits **`401.3 tok/s`** prefill (**`3.6×` faster** than Oryon CPU `112.4 tok/s`), while 8-core Oryon CPU decodes faster single-stream (`15.10 tok/s` vs `8.69 tok/s` NPU, as `M=1` `hvx-tiled` uses ~`54 GB/s` vs CPU ~`94 GB/s`).
+   - On **`Moon-Beam-8B-A1B-NPU:Q4_0` (`bailingmoe3`)**, NPU dominates prefill (**`346.7 tok/s`** vs `233.3` CPU / `87.8` Adreno GPU) and runs sparse MoE experts on-chip (`50.3%` in `MUL_MAT_ID(_NX)`), while `-c cpu` (`UNSLOTH_COMPUTE=cpu` opt-in) hits **`65.41 tok/s`** prose / `57.55` code decode via full DDR/cache residency, and Adreno `X1-45` (`ADRENO_XMEM_GEMM=1` + `FUSE_MOE_COMBINE=1`) hits `26.03 / 26.49 tok/s`.
+2. **Hexagon Kernel, `VMEM`, & Dual-Session Knobs:**
+   - **Auto-wired `GENIEX_DECODE_POLL=1` for QAIRT AOT (`<=2B`):** Comparing `qualcomm/Qwen3-0.6B` (`QAIRT W4A16`) vs `unsloth/Qwen3-0.6B-GGUF:Q4_0` (`llama_cpp`), QAIRT AOT reached **`4,655.9 tok/s`** prefill (**`2.1×` faster** than `2,208.4` `ggml-hexagon`) and **`88.17 tok/s`** decode (`88.39` with `GENIEX_CLOCK_KEEPER_THREADS=1`, vs `75.94` `ggml-hexagon`). On `qualcomm/Qwen3-1.7B`, `GENIEX_DECODE_POLL=1` lifted both prefill (`2,673.9 -> 2,807.0 tok/s`) and decode (`42.93 -> 43.17` / `43.23`). Larger QAIRT bundles (`qualcomm/Qwen3-4B`) hit a FastRPC PD mapping limit (`0x200` / `QNN err 1002` at `1.99 GB`), so the bridge tags QAIRT models as `*-QAIRT-NPU` without colliding with `ggml-hexagon` GGUFs and omits `--nctx`/`--ngl` automatically.
+   - **Auto-wired Mid-RAM `ngl=2` for Hybrid SSD Offload (`4.5–10.5 GB` live free RAM):** On `Gemma-4-26B-A4B-it-NPU:IQ4_NL` (`13.61 GB`, `2048` ctx), bumping `ngl=0 -> ngl=2` nearly doubled prose decode (**`2.63 -> 5.07 tok/s`**, **`+93%`**), lifted code decode (**`6.02 -> 8.27 tok/s`**, **`+37%`**), and raised prefill (`25.26 -> 29.22 tok/s`) in `84.5s` warm load (`ngl=4` hit `6.13` prose in `123s`, `hybrid ngl=0` hit `8.25` prose in `146s`, and `ngl=0` + cached `--spec-type draft-mtp` hit **`10.47 tok/s` code**).
+   - **Opt-In Power-User Flags (NOT wired globally due to tradeoffs):**
+     - `GGML_HEXAGON_MM_SELECT=1`: boosts `Moon-Beam` decode **`+13.3%`** (`28.64 -> 32.46 tok/s`) by selecting HVX kernels, but cuts prefill `346 -> 123 tok/s` and stalls dense `Ornith` prefill.
+     - `GGML_HEXAGON_VMEM=4096`: boosts `Moon-Beam` decode to `28.77 tok/s`, but hangs `unsloth/Qwen3-4B-GGUF:Q4_0` at load (while `VMEM=4608`/`6144` fail load).
+     - `HTP0,HTP1` dual virtual sessions: regresses `Moon-Beam` to `16.7 tok/s` (`infer`) and fails `Ornith` load (`-100201`) because `X1-26-100` has a single physical CDSP core (`phys=0`). `--power-mode burst` beats `sustained_high_performance` (`26.35`) and `high_performance` (`26.30`) even on 512-token runs.
+3. **Concurrency (`geniex serve` vs Upstream `llama.cpp b12833` Adreno OpenCL):**
+   - `geniex serve` (`n_seq_max=1`) holds steady aggregate throughput (`Qwen3-4B`: `16.62 / 16.81 / 16.76 tok/s`, `Moon-Beam`: `26.40 / 26.62 / 26.69 tok/s` across `c=1,2,4`), outperforming upstream `llama-server b12833` on `Adreno X1-45` OpenCL (`Qwen3-4B` `ub=512 F16`: `12.97 tok/s` decode / `124.85 tok/s` prefill; `-np 4` with `-ctk q8_0 -ctv q8_0` scales `5.04 -> 6.36 -> 7.02 tok/s`).
 
 </details>
 

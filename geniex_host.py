@@ -79,12 +79,17 @@ def safe_model_id(checkpoint: str) -> str:
     return cleaned
 
 
-def default_hf_repo(checkpoint: str) -> str:
+def default_hf_repo(checkpoint: str, *, runtime: str = "") -> str:
     """Derive a display repo ending in -NPU so Studio's NPU name matcher recognizes it."""
     base = checkpoint.split(":", 1)[0].strip()
     if base.lower().endswith("-gguf"):
         base = base[:-5]
-    if not base.upper().endswith("-NPU"):
+    if str(runtime).strip().lower() == "qairt":
+        if base.upper().endswith("-NPU"):
+            base = base[:-4]
+        if not base.upper().endswith("-QAIRT-NPU"):
+            base = f"{base}-QAIRT-NPU"
+    elif not base.upper().endswith("-NPU"):
         base = f"{base}-NPU"
     return base
 
@@ -371,6 +376,7 @@ class GenieX:
                 "mtp_path": mtp_path,
                 "downloaded": downloaded,
                 "recipe": "flm",
+                "runtime": str((matched_entry.get("runtime") if matched_entry else None) or preset.get("runtime") or "llama_cpp").lower(),
                 "max_context_window": int(preset.get("max_context_window") or 32768),
             }
             rows.append(_attach_plan_fields(row))
@@ -387,10 +393,11 @@ class GenieX:
             )
             mtype = str(entry.get("type") or "llm").lower()
             labels = ["chat", "vision"] if mtype == "vlm" else ["chat", "tool-calling"]
+            rt = str(entry.get("runtime") or "llama_cpp").lower()
             row = {
                 "id": safe_model_id(ckpt),
                 "checkpoint": ckpt,
-                "hf_repo": default_hf_repo(ckpt),
+                "hf_repo": default_hf_repo(ckpt, runtime=rt),
                 "labels": labels,
                 "size": size_gb,
                 "n_layers": 40,
@@ -399,6 +406,7 @@ class GenieX:
                 "mtp_path": mtp_path,
                 "downloaded": True,
                 "recipe": "flm",
+                "runtime": rt,
                 "max_context_window": 32768,
             }
             rows.append(_attach_plan_fields(row))
@@ -532,15 +540,18 @@ def plan_model_execution(
     req_ctx = int(requested_ctx) if isinstance(requested_ctx, (int, float)) and int(requested_ctx) > 0 else 8192
     ctx = min(req_ctx, max_ctx)
 
+    runtime = str(row.get("runtime") or "llama_cpp").strip().lower()
     attempts: list[dict[str, Any]] = []
     if not ssd_offload:
         tier = "in_ram_npu"
-        # GenieX v0.12.0+ (QAIRT 2.51): DMA64 + OPFUSION trimmed Moon-Beam warm-load 2.26s & lifted prefill
-        env_overrides = (
-            {}
-            if disable_htp_tuning
-            else {"GGML_HEXAGON_DMA64": "1", "GGML_HEXAGON_OPFUSION": "1"}
-        )
+        # GenieX v0.12.0+ (QAIRT 2.51): DMA64 + OPFUSION for llama_cpp; GENIEX_DECODE_POLL=1 for QAIRT AOT.
+        # Keep GGML_HEXAGON_VMEM unset globally (4096 improves Moon-Beam +1.7% opt-in, but hangs Qwen3-4B load).
+        if disable_htp_tuning:
+            env_overrides = {}
+        elif runtime == "qairt":
+            env_overrides = {"GENIEX_DECODE_POLL": "1"}
+        else:
+            env_overrides = {"GGML_HEXAGON_DMA64": "1", "GGML_HEXAGON_OPFUSION": "1"}
         attempts.append({"compute": "npu", "ngl": -1, "use_mtp": bool(mtp_path), "ctx": ctx, "warm_timeout": 240.0})
         if mtp_path:
             attempts.append({"compute": "npu", "ngl": -1, "use_mtp": False, "ctx": ctx, "warm_timeout": 180.0})
@@ -556,9 +567,16 @@ def plan_model_execution(
         }
         tight_live_ram = avail_ram_gb < min(10.5, total_ram_gb * 0.68)
         if tight_live_ram:
-            # Skip doomed high-ngl / MTP pinning probes so /v1/load hits working ngl=0 well within Studio's 900s budget
-            attempts.append({"compute": "npu", "ngl": 0, "use_mtp": False, "ctx": ctx, "warm_timeout": 540.0})
-            attempts.append({"compute": "cpu", "ngl": None, "use_mtp": False, "ctx": ctx, "warm_timeout": 240.0})
+            if avail_ram_gb >= 4.5:
+                # 4.5-10.5 GB free RAM: partial ngl=2 offload (+93% prose / +37% code / +15.7% prefill on Gemma-4-26B)
+                # with automatic fallback to ngl=0 -> cpu inside Studio's 900s load budget.
+                attempts.append({"compute": "npu", "ngl": 2, "use_mtp": False, "ctx": ctx, "warm_timeout": 150.0})
+                attempts.append({"compute": "npu", "ngl": 0, "use_mtp": False, "ctx": ctx, "warm_timeout": 420.0})
+                attempts.append({"compute": "cpu", "ngl": None, "use_mtp": False, "ctx": ctx, "warm_timeout": 200.0})
+            else:
+                # Extreme RAM pressure (<4.5 GB free): go straight to working ngl=0 -> cpu
+                attempts.append({"compute": "npu", "ngl": 0, "use_mtp": False, "ctx": ctx, "warm_timeout": 540.0})
+                attempts.append({"compute": "cpu", "ngl": None, "use_mtp": False, "ctx": ctx, "warm_timeout": 240.0})
         else:
             ngl = max(4, min(total_layers - 2, int((usable_npu_ram_gb * 0.72 / size_gb) * total_layers)))
             half_ngl = max(4, ngl // 2)
@@ -860,16 +878,24 @@ def make_handler(
             # Explicit user env vars always take precedence over default plan tuning overrides
             child_env = {**plan["env_overrides"], **os.environ}
             warm_timeout = 420.0 if plan["ssd_offload"] else 300.0
+            is_qairt = str(row.get("runtime") or "").strip().lower() == "qairt"
             flm_extra = _translate_flm_args(flm_args)
             disable_spec = os.environ.get("UNSLOTH_DISABLE_SPEC", "").strip().lower() in ("1", "true", "yes")
             env_spec_type = "" if disable_spec else os.environ.get("UNSLOTH_SPEC_TYPE", "").strip()
             env_draft_model = os.environ.get("UNSLOTH_DRAFT_MODEL", "").strip()
             env_draft_tokens = os.environ.get("UNSLOTH_DRAFT_TOKENS", "").strip()
+            env_draft_min = os.environ.get("UNSLOTH_DRAFT_MIN", "").strip()
+            env_compute = os.environ.get("UNSLOTH_COMPUTE", "").strip().lower()
 
             last_error = "Failed to start GenieX."
             for idx, attempt in enumerate(plan["attempts"]):
                 attempt_ctx = int(attempt.get("ctx") or plan_ctx)
                 attempt_warm_timeout = float(attempt.get("warm_timeout") or warm_timeout)
+                eff_compute = (
+                    env_compute
+                    if (idx == 0 and env_compute in ("npu", "cpu", "gpu", "hybrid"))
+                    else attempt["compute"]
+                )
                 port = _free_port()
                 cmd = [
                     str(geniex.binary),
@@ -877,28 +903,29 @@ def make_handler(
                     "--host",
                     f"127.0.0.1:{port}",
                     "-c",
-                    attempt["compute"],
+                    eff_compute,
                     "--model",
                     row["checkpoint"],
-                    "--nctx",
-                    str(attempt_ctx),
-                    "--keepalive",
-                    "3600",
-                    "--skip-update",
-                    *flm_extra,
                 ]
-                if plan["ssd_offload"] and attempt["compute"] in ("npu", "hybrid") and "--power-mode" not in flm_extra:
+                if not is_qairt:
+                    cmd.extend(["--nctx", str(attempt_ctx)])
+                cmd.extend(["--keepalive", "3600", "--skip-update", *flm_extra])
+                if plan["ssd_offload"] and eff_compute in ("npu", "hybrid") and "--power-mode" not in flm_extra:
                     cmd.extend(["--power-mode", "burst"])
-                if attempt.get("ngl") is not None:
+                if not is_qairt and eff_compute != "cpu" and attempt.get("ngl") is not None:
                     cmd.extend(["--ngl", str(attempt["ngl"])])
-                if attempt.get("use_mtp") and plan.get("mtp_path"):
+                if not is_qairt and attempt.get("use_mtp") and plan.get("mtp_path"):
                     cmd.extend(["--spec-type", "draft-mtp", "--draft-model", str(plan["mtp_path"])])
-                elif env_spec_type and "--spec-type" not in flm_extra and attempt["compute"] == "npu":
+                elif not is_qairt and env_spec_type and "--spec-type" not in flm_extra and eff_compute == "npu":
                     cmd.extend(["--spec-type", env_spec_type])
                     if env_draft_model and "--draft-model" not in flm_extra:
                         cmd.extend(["--draft-model", env_draft_model])
                     if env_draft_tokens and "--draft-tokens" not in flm_extra:
                         cmd.extend(["--draft-tokens", env_draft_tokens])
+                    if env_draft_min and "--draft-min" not in flm_extra:
+                        cmd.extend(["--draft-min", env_draft_min])
+                    elif env_spec_type.startswith("ngram") and "--draft-min" not in flm_extra:
+                        cmd.extend(["--draft-min", "1"])
 
                 log(
                     f"Starting [{plan['tier']}] attempt {idx + 1}/{len(plan['attempts'])} "

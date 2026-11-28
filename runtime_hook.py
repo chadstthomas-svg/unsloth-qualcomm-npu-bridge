@@ -223,10 +223,17 @@ def _lookup_curated_hf_repo(checkpoint: str) -> Optional[str]:
         pass
     if "/" not in ckpt:
         return None
-    base = ckpt.split(":", 1)[0].strip()
+    base, _, tag = ckpt.partition(":")
+    base = base.strip()
+    tag_l = tag.strip().lower()
     if base.lower().endswith("-gguf"):
         base = base[:-5]
-    if not base.upper().endswith("-NPU"):
+    if tag_l == "w4a16" or base.lower().startswith("qualcomm/"):
+        if base.upper().endswith("-NPU"):
+            base = base[:-4]
+        if not base.upper().endswith("-QAIRT-NPU"):
+            base = f"{base}-QAIRT-NPU"
+    elif not base.upper().endswith("-NPU"):
         base = f"{base}-NPU"
     return base
 

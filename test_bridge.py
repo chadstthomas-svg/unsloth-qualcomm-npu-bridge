@@ -104,7 +104,10 @@ def main() -> int:
             )
         downloaded = [m for m in catalog if m.downloaded]
         assert downloaded, "Expected at least one downloaded NPU model"
-        target_model = next((m for m in downloaded if "Qwen3-0.6B" in m.id), downloaded[0])
+        target_model = next(
+            (m for m in downloaded if "unsloth--Qwen3-0.6B" in m.id),
+            next((m for m in downloaded if "Qwen3-0.6B" in m.id and "QAIRT" not in m.display_name), downloaded[0]),
+        )
 
         if "Qwen3-0.6B" in target_model.id:
             resolved_path = npu.model_path_for_name("Qwen3-0.6B-NPU", start_runtime=False)
@@ -254,6 +257,14 @@ def main() -> int:
     )
     assert p_gemma_tight["tier"] == "hybrid_npu_ssd" and p_gemma_tight["attempts"][0]["ngl"] == 0
     assert sum(float(a.get("warm_timeout", 300.0)) for a in p_gemma_tight["attempts"]) <= 850.0
+    p_gemma_mid = geniex_host.plan_model_execution(
+        {"size": 13.61, "n_layers": 42, "mtp_path": "mtp.gguf"},
+        {"total_ram_gb": 15.61, "avail_ram_gb": 6.0, "disk_free_gb": 65.0},
+        requested_ctx=4096,
+    )
+    assert p_gemma_mid["tier"] == "hybrid_npu_ssd"
+    assert p_gemma_mid["attempts"][0]["ngl"] == 2 and p_gemma_mid["attempts"][1]["ngl"] == 0
+    assert sum(float(a.get("warm_timeout", 300.0)) for a in p_gemma_mid["attempts"]) <= 850.0
     p_inram_tune = geniex_host.plan_model_execution(
         moonbeam_row,
         {"total_ram_gb": 15.61, "avail_ram_gb": 9.0, "disk_free_gb": 50.0},
@@ -261,6 +272,13 @@ def main() -> int:
     )
     assert p_inram_tune["env_overrides"].get("GGML_HEXAGON_DMA64") == "1"
     assert p_inram_tune["env_overrides"].get("GGML_HEXAGON_OPFUSION") == "1"
+    assert "GGML_HEXAGON_VMEM" not in p_inram_tune["env_overrides"]
+    p_qairt_tune = geniex_host.plan_model_execution(
+        {"name": "qualcomm/Qwen3-0.6B", "runtime": "qairt", "size": 0.72, "n_layers": 28},
+        {"total_ram_gb": 15.61, "avail_ram_gb": 9.0, "disk_free_gb": 50.0},
+        requested_ctx=4096,
+    )
+    assert p_qairt_tune["env_overrides"].get("GENIEX_DECODE_POLL") == "1"
     assert geniex_host._translate_flm_args("--pmode turbo --spec-type draft-mtp --draft-tokens 4") == [
         "--power-mode",
         "burst",
@@ -269,7 +287,7 @@ def main() -> int:
         "--draft-tokens",
         "4",
     ]
-    print("  10d. Tight-RAM hybrid_npu_ssd, HTP DMA64/OPFUSION tuning & spec pass-through checks passed")
+    print("  10d. Tight/mid-RAM hybrid_npu_ssd (ngl=0/2), HTP/QAIRT tuning & spec pass-through checks passed")
 
     try:
         re_status = npu.enable()
