@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -191,6 +193,109 @@ def main() -> int:
     post_shutdown_status = npu.status()
     print("Post-shutdown status (persisted validation):", json.dumps(post_shutdown_status, indent=2))
     assert post_shutdown_status["ready"] is True, "Expected ready=True persisted via npu_validated.json"
+
+    print("\n=== 9. Multi-Machine & SSD-Offload Execution Planner Matrix ===")
+    bridge_dir = str(Path(__file__).resolve().parent)
+    if bridge_dir not in sys.path:
+        sys.path.insert(0, bridge_dir)
+    import geniex_host
+
+    live_profile = geniex_host.detect_system_profile()
+    print("Live profile:", json.dumps(live_profile))
+    assert live_profile["total_ram_gb"] >= 4.0
+
+    models_matrix = [
+        {"name": "0.38GB tiny", "size": 0.38, "n_layers": 28, "mtp_path": None},
+        {"name": "5.25GB dense", "size": 5.25, "n_layers": 36, "mtp_path": None},
+        {"name": "14.8GB MoE+MTP", "size": 14.8, "n_layers": 42, "mtp_path": "mtp-gemma.gguf"},
+        {"name": "19.5GB MoE+MTP", "size": 19.5, "n_layers": 48, "mtp_path": "mtp-qwen.gguf"},
+        {"name": "95.0GB MoE+MTP", "size": 95.0, "n_layers": 60, "mtp_path": "mtp-flash.gguf"},
+    ]
+    for ram_gb in (8.0, 16.0, 32.0, 64.0, 128.0):
+        sim = {"total_ram_gb": ram_gb, "avail_ram_gb": ram_gb * 0.72, "disk_free_gb": 500.0}
+        summaries = []
+        for row in models_matrix:
+            plan = geniex_host.plan_model_execution(row, sim, requested_ctx=32768)
+            first = plan["attempts"][0]
+            if row["size"] > ram_gb * 0.65:
+                assert plan["tier"] == "hybrid_npu_ssd", f"Expected hybrid_npu_ssd for {row} on {ram_gb}GB"
+                assert plan["ssd_offload"] is True
+                assert plan["env_overrides"].get("GGML_HEXAGON_RT_REPACK") == "0"
+                assert 4 <= first["ngl"] < row["n_layers"]
+            else:
+                assert plan["tier"] == "in_ram_npu", f"Expected in_ram_npu for {row} on {ram_gb}GB"
+                assert plan["ssd_offload"] is False
+                assert first["ngl"] == -1
+            if row["mtp_path"]:
+                assert first["use_mtp"] is True
+            summaries.append(f"{row['name']}={plan['tier']}(ngl={first['ngl']},ctx={plan['ctx']})")
+        print(f"  RAM={int(ram_gb):3d}GB -> " + " | ".join(summaries))
+
+    print("\n=== 10. Memory Clamp, Catalog Cache & Crash Auto-Respawn Regression ===")
+    moonbeam_row = {"name": "Moon-Beam-8B-NPU", "size": 4.71, "n_layers": 32, "mtp_path": None}
+    for avail_gb, expected_ctx in ((5.8, 4096), (8.0, 8192), (11.0, 16384)):
+        p_tight = geniex_host.plan_model_execution(
+            moonbeam_row,
+            {"total_ram_gb": 15.61, "avail_ram_gb": avail_gb, "disk_free_gb": 200.0},
+            requested_ctx=16384,
+        )
+        assert p_tight["tier"] == "in_ram_npu"
+        assert p_tight["ctx"] == expected_ctx, (
+            f"avail={avail_gb}GB expected ctx={expected_ctx}, got {p_tight['ctx']}"
+        )
+    print("  10a. Tight avail_ram_gb context clamp passed: avail 5.8/8.0/11.0GB -> ctx 4096/8192/16384")
+
+    try:
+        re_status = npu.enable()
+        flm_ver = (re_status.get("versions") or {}).get("fastflowlm") or ""
+        print(f"  Dynamic runtime_hook versions.fastflowlm={flm_ver!r}")
+        assert flm_ver.startswith("v") and "GenieX" in flm_ver
+
+        t_cat = []
+        for _ in range(3):
+            t0 = time.perf_counter()
+            cat_rows = npu.catalog()
+            t_cat.append(time.perf_counter() - t0)
+            assert len(cat_rows) >= 1
+        print(
+            f"  10b. Catalog timings: call1={t_cat[0]*1000:.1f}ms, "
+            f"call2={t_cat[1]*1000:.1f}ms, call3={t_cat[2]*1000:.1f}ms"
+        )
+        assert t_cat[1] < 0.05 and t_cat[2] < 0.05, f"Expected cached catalog <50ms, got {t_cat}"
+
+        npu.load(target_model.id, context_length=8192)
+        upstream2 = npu.upstream()
+        client2 = httpx.Client(trust_env=False, timeout=180.0)
+        headers2 = {"Authorization": f"Bearer {upstream2.api_key}"}
+
+        kill_res = subprocess.run(
+            ["taskkill", "/F", "/IM", "geniex.exe"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        print(f"  10c. Simulated child crash (taskkill rc={kill_res.returncode}); sending immediate chat...")
+        time.sleep(0.5)
+
+        r_respawn = client2.post(
+            f"{upstream2.base_url}/chat/completions",
+            headers=headers2,
+            json={
+                "model": upstream2.model,
+                "messages": [{"role": "user", "content": "Say 'Respawned!' and nothing else."}],
+                "max_tokens": 16,
+                "stream": False,
+                "think": False,
+            },
+        )
+        assert r_respawn.status_code == 200, f"Expected 200 after respawn, got {r_respawn.status_code}: {r_respawn.text}"
+        respawn_reply = r_respawn.json()["choices"][0]["message"]["content"]
+        print("  10c. Auto-respawn reply:", repr(respawn_reply))
+        assert respawn_reply.strip(), "Expected non-empty reply after child crash respawn"
+        npu.unload()
+    finally:
+        npu.shutdown()
+
     print("\nALL QUALCOMM HEXAGON NPU BRIDGE TESTS PASSED!")
     return 0
 

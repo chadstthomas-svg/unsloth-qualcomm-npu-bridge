@@ -217,36 +217,50 @@ def quantize_gguf(
         )
     dst_gguf.parent.mkdir(parents=True, exist_ok=True)
     tmp_dst = dst_gguf.with_name(f".quantizing-{dst_gguf.name}")
-    if tmp_dst.exists():
-        tmp_dst.unlink()
 
     src_quant = detect_quant_from_gguf(src_gguf)
-    cmd = [str(quantizer)]
-    if src_quant and src_quant not in _NO_REQUANTIZE_SOURCES:
-        cmd.append("--allow-requantize")
-    elif not src_quant:
-        cmd.append("--allow-requantize")
+    base_cmd = [str(quantizer)]
+    if (src_quant and src_quant not in _NO_REQUANTIZE_SOURCES) or not src_quant:
+        base_cmd.append("--allow-requantize")
 
+    attempts: list[list[str]] = []
     if pure:
-        cmd.append("--pure")
+        attempts.append([*base_cmd, "--pure", str(src_gguf), str(tmp_dst), target_quant.upper()])
     elif target_quant.upper() == "Q4_0":
         # Both Q4_0 and Q8_0 have native 32x2/tiled HVX kernels in libggml-htp-v73.so;
         # keeping output.weight & token_embd at Q8_0 preserves accuracy while staying on HTP0.
-        cmd.extend(["--output-tensor-type", "Q8_0", "--token-embedding-type", "Q8_0"])
+        attempts.append([
+            *base_cmd,
+            "--output-tensor-type",
+            "Q8_0",
+            "--token-embedding-type",
+            "Q8_0",
+            str(src_gguf),
+            str(tmp_dst),
+            target_quant.upper(),
+        ])
+        # Fallback if a model architecture rejects mixed head/embedding overrides.
+        attempts.append([*base_cmd, str(src_gguf), str(tmp_dst), target_quant.upper()])
+    else:
+        attempts.append([*base_cmd, str(src_gguf), str(tmp_dst), target_quant.upper()])
 
-    cmd.extend([str(src_gguf), str(tmp_dst), target_quant.upper()])
-    if threads > 0:
-        cmd.append(str(threads))
-
-    print(f"[QUANTIZE] Running: {' '.join(cmd)}", flush=True)
-    proc = subprocess.run(cmd, check=False)
-    if proc.returncode != 0 or not tmp_dst.is_file() or tmp_dst.stat().st_size == 0:
+    last_code = 1
+    for idx, cmd in enumerate(attempts):
+        if threads > 0:
+            cmd = [*cmd, str(threads)]
         if tmp_dst.exists():
             tmp_dst.unlink()
-        raise RuntimeError(f"llama-quantize exited with code {proc.returncode}")
-    os.replace(tmp_dst, dst_gguf)
-    print(f"[QUANTIZE] Wrote {dst_gguf} ({dst_gguf.stat().st_size / 1e9:.2f} GB)", flush=True)
-    return dst_gguf
+        print(f"[QUANTIZE] Running (attempt {idx + 1}/{len(attempts)}): {' '.join(cmd)}", flush=True)
+        proc = subprocess.run(cmd, check=False)
+        last_code = proc.returncode
+        if last_code == 0 and tmp_dst.is_file() and tmp_dst.stat().st_size > 0:
+            os.replace(tmp_dst, dst_gguf)
+            print(f"[QUANTIZE] Wrote {dst_gguf} ({dst_gguf.stat().st_size / 1e9:.2f} GB)", flush=True)
+            return dst_gguf
+        if tmp_dst.exists():
+            tmp_dst.unlink()
+
+    raise RuntimeError(f"llama-quantize exited with code {last_code}")
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:
@@ -277,8 +291,9 @@ def register_in_geniex(
     geniex_cache: Path,
     *,
     display_name: Optional[str] = None,
+    mtp_path: Optional[Path] = None,
 ) -> Path:
-    """Place/hardlink `gguf_path` into GenieX cache and merge into `geniex.json`."""
+    """Place/hardlink `gguf_path` (and optional MTP draft head) into GenieX cache and `geniex.json`."""
     parts = [p for p in repo_name.strip().replace("\\", "/").split("/") if p]
     if len(parts) == 1:
         parts = ["local", parts[0]]
@@ -316,7 +331,21 @@ def register_in_geniex(
     manifest["ModelFile"] = model_file
     manifest.setdefault("MMProjFile", {"Name": "", "Downloaded": False, "Size": 0})
     manifest.setdefault("TokenizerFile", {"Name": "", "Downloaded": False, "Size": 0})
-    manifest.setdefault("ExtraFiles", [])
+    extra_files = manifest.get("ExtraFiles")
+    if not isinstance(extra_files, list):
+        extra_files = []
+
+    if mtp_path is not None and mtp_path.is_file():
+        dest_mtp = model_dir / mtp_path.name
+        _link_or_copy(mtp_path, dest_mtp)
+        mtp_size = dest_mtp.stat().st_size
+        mtp_entry = {"Name": dest_mtp.name, "Downloaded": True, "Size": mtp_size}
+        manifest["MtpFile"] = mtp_entry
+        extra_files = [e for e in extra_files if not (isinstance(e, dict) and e.get("Name") == dest_mtp.name)]
+        extra_files.append(mtp_entry)
+        print(f"[MTP] Registered draft head: {dest_mtp} ({mtp_size / 1e9:.2f} GB)")
+
+    manifest["ExtraFiles"] = extra_files
 
     tmp = manifest_path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(manifest), encoding="utf-8")
@@ -387,12 +416,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("gguf", nargs="?", type=Path, help="Local GGUF file path")
     parser.add_argument("--hf-repo", help="Hugging Face repo ID (e.g. tablinum/Moon-Beam-8B-A1B-GGUF)")
     parser.add_argument("--hf-file", help="GGUF filename in --hf-repo (e.g. Moon-Beam-8B-A1B-Q4_K_M.gguf)")
+    parser.add_argument("--hf-mtp-file", help="Optional MTP draft head GGUF path in --hf-repo")
     parser.add_argument("--hf-rev", default="main", help="Hugging Face revision (default: main)")
+    parser.add_argument("--mtp-gguf", type=Path, help="Optional local MTP draft head GGUF path")
     parser.add_argument("--name", help="GenieX repo name (<org>/<repo>, default derived)")
     parser.add_argument("--quant", default="Q4_0", help="Target Hexagon quantization (default: Q4_0)")
     parser.add_argument("--pure", action="store_true", help="Use pure --pure quantization without Q8_0 head/embed")
     parser.add_argument("--no-convert", "--skip-quantize", action="store_true", dest="no_convert", help="Register input GGUF without re-quantizing")
     parser.add_argument("--also-register-source", action="store_true", help="Also register the downloaded/source GGUF alongside converted target")
+    parser.add_argument(
+        "--delete-source-after-quantize",
+        action="store_true",
+        help="Remove temporary source GGUF after conversion succeeds (useful on tight NVMe drives)",
+    )
     parser.add_argument("--scan-exports", action="store_true", help="Scan Unsloth Studio exports/ and register Hexagon models")
     parser.add_argument("--auto-quantize", action="store_true", help="With --scan-exports, quantize F16/BF16/non-Hexagon GGUFs to --quant")
     parser.add_argument("--geniex-cache", type=Path, help="Override GenieX cache root (default: GENIEX_DATADIR or ~/.cache/geniex)")
@@ -410,6 +446,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
 
     src_gguf: Optional[Path] = args.gguf
+    mtp_gguf: Optional[Path] = args.mtp_gguf
     repo_name = args.name
     if args.hf_repo:
         if not args.hf_file:
@@ -420,22 +457,26 @@ def main(argv: Optional[list[str]] = None) -> int:
             parts = ["hf", parts[0]]
         dl_dir = geniex_cache / "models" / Path(*parts)
         src_gguf = download_hf_file(args.hf_repo, args.hf_file, dl_dir, revision=args.hf_rev)
+        if args.hf_mtp_file:
+            mtp_gguf = download_hf_file(args.hf_repo, args.hf_mtp_file, dl_dir, revision=args.hf_rev)
     elif src_gguf is None:
         parser.error("Provide a local GGUF path, --hf-repo + --hf-file, or --scan-exports.")
 
     if not src_gguf.is_file():
         raise FileNotFoundError(f"Source GGUF not found: {src_gguf}")
+    if mtp_gguf is not None and not mtp_gguf.is_file():
+        raise FileNotFoundError(f"MTP draft GGUF not found: {mtp_gguf}")
 
     repo_name = derive_repo_name(src_gguf, repo_name)
     src_quant = detect_quant_from_gguf(src_gguf)
     target_quant = args.quant.upper()
 
     if args.no_convert or (src_quant and src_quant == target_quant):
-        register_in_geniex(src_gguf, repo_name, src_quant or target_quant, geniex_cache)
+        register_in_geniex(src_gguf, repo_name, src_quant or target_quant, geniex_cache, mtp_path=mtp_gguf)
         return 0
 
     if args.also_register_source and src_quant in HEXAGON_NATIVE_QUANTS:
-        register_in_geniex(src_gguf, repo_name, src_quant, geniex_cache)
+        register_in_geniex(src_gguf, repo_name, src_quant, geniex_cache, mtp_path=mtp_gguf)
 
     parts = [p for p in repo_name.split("/") if p]
     if len(parts) == 1:
@@ -447,7 +488,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         print(f"[QUANTIZE] Using existing converted file: {out_path} ({out_path.stat().st_size / 1e9:.2f} GB)")
 
-    register_in_geniex(out_path, repo_name, target_quant, geniex_cache)
+    register_in_geniex(out_path, repo_name, target_quant, geniex_cache, mtp_path=mtp_gguf)
+
+    if args.delete_source_after_quantize and not args.also_register_source and src_gguf.resolve() != out_path.resolve():
+        try:
+            src_size_gb = src_gguf.stat().st_size / 1e9
+            src_gguf.unlink()
+            print(f"[CLEANUP] Deleted source GGUF {src_gguf.name} ({src_size_gb:.2f} GB)")
+        except OSError as exc:
+            print(f"[CLEANUP] Warning: could not delete {src_gguf}: {exc}")
+
     return 0
 
 

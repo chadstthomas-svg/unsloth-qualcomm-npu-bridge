@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -123,6 +124,40 @@ def _find_geniex_binary() -> Optional[Path]:
         if candidate.is_file():
             return candidate
     return None
+
+
+_GENIEX_VERSION_CACHE: Optional[tuple[float, str]] = None
+
+
+def _cached_geniex_version(binary: Path) -> str:
+    """Return cached 'vX.Y.Z (GenieX)' (or 'GenieX' fallback) from `geniex --version`."""
+    global _GENIEX_VERSION_CACHE
+    now = time.monotonic()
+    if _GENIEX_VERSION_CACHE is not None and (now - _GENIEX_VERSION_CACHE[0]) < 60.0:
+        return _GENIEX_VERSION_CACHE[1]
+    label = "GenieX"
+    try:
+        kwargs: dict[str, Any] = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+        done = subprocess.run(
+            [str(binary), "--version", "--skip-update"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5.0,
+            **kwargs,
+        )
+        output = (done.stdout or "") + (done.stderr or "")
+        for line in output.splitlines():
+            if "GenieX CLI Version:" in line:
+                ver = line.split(":", 1)[1].strip().lstrip("v")
+                if ver:
+                    label = f"v{ver} (GenieX)"
+                break
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _GENIEX_VERSION_CACHE = (now, label)
+    return label
 
 
 def _is_qualcomm_hw() -> bool:
@@ -373,7 +408,10 @@ def _patch_npu_backend_module(mod: Any) -> None:
         @functools.wraps(orig_installed_flm_ver)
         def wrapped_installed_flm_version(self: Any) -> Optional[str]:
             if self._is_qualcomm():
-                return "v0.11.0 (GenieX)" if self._installed_lemond() is not None else None
+                if self._installed_lemond() is None:
+                    return None
+                geniex_bin = _find_geniex_binary()
+                return _cached_geniex_version(geniex_bin) if geniex_bin is not None else "GenieX"
             return orig_installed_flm_ver(self)
 
         cls._installed_flm_version = _tag(wrapped_installed_flm_version)

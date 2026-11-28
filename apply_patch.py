@@ -80,6 +80,52 @@ def _legacy_patched_files() -> list[tuple[str, Path, Path]]:
     return found
 
 
+def _merge_models_json(src: Path, dst: Path) -> None:
+    """Merge new curated presets from `src` into `dst` without dropping custom entries."""
+    import json
+
+    if not dst.is_file():
+        shutil.copy2(src, dst)
+        print(f"[SYNCED] {dst}")
+        return
+    try:
+        src_data = json.loads(src.read_text(encoding="utf-8"))
+        dst_data = json.loads(dst.read_text(encoding="utf-8"))
+        src_models = src_data.get("models") or []
+        dst_models = dst_data.get("models") or []
+        by_ckpt = {
+            str(m.get("checkpoint") or "").strip().lower(): i
+            for i, m in enumerate(dst_models)
+            if isinstance(m, dict) and m.get("checkpoint")
+        }
+        added = 0
+        updated = 0
+        for entry in src_models:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("checkpoint") or "").strip().lower()
+            if not key:
+                continue
+            if key not in by_ckpt:
+                dst_models.append(entry)
+                by_ckpt[key] = len(dst_models) - 1
+                added += 1
+            else:
+                # Backfill new metadata keys (n_layers, mtp_file, min_ram_gb) cleanly
+                existing = dst_models[by_ckpt[key]]
+                for k, v in entry.items():
+                    if k not in existing:
+                        existing[k] = v
+                        updated += 1
+        if added or updated:
+            dst_data["models"] = dst_models
+            dst.write_text(json.dumps(dst_data, indent=2) + "\n", encoding="utf-8")
+            print(f"[MERGED] {dst} (+{added} models, +{updated} metadata fields)")
+    except Exception:
+        shutil.copy2(src, dst)
+        print(f"[SYNCED] {dst}")
+
+
 def _sync_bridge_runtime_files() -> None:
     """Copy runtime_hook.py, geniex_host.py, and models.json into ~/.unsloth/qualcomm-npu-bridge."""
     src_dir = Path(__file__).resolve().parent
@@ -90,8 +136,9 @@ def _sync_bridge_runtime_files() -> None:
         src = src_dir / name
         dst = BRIDGE_HOME / name
         if src.is_file():
-            if name == "models.json" and dst.is_file():
-                continue  # Preserve user-customized models.json
+            if name == "models.json":
+                _merge_models_json(src, dst)
+                continue
             shutil.copy2(src, dst)
             print(f"[SYNCED] {dst}")
 

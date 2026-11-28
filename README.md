@@ -79,7 +79,9 @@ Measured on the same **Snapdragon X (`X1-26-100`, 16 GB)** running **`Moon-Beam-
 
 - **Update-Proof Zero-Modification `.pth` Runtime Shim:** Installs a single tiny `unsloth_qualcomm_npu_bridge.pth` hook in `Lib\site-packages\` pointing to `~/.unsloth/qualcomm-npu-bridge/runtime_hook.py` (`sys.meta_path` import interceptor). All Unsloth Studio source files stay **100% stock on disk**, so in-place Studio updates (`uv pip install --upgrade unsloth`) **never overwrite or break the shim**. If upstream PR [`unslothai/unsloth#19316`](https://github.com/unslothai/unsloth/pull/19316) is merged in a future release, the hook automatically steps aside as a no-op.
 - **No Windows `TESTSIGNING` Mode Required:** Uses **Qualcomm GenieX CLI (`Qualcomm.GenieX.CLI`)** which ships **Microsoft-signed** Windows ARM64 Hexagon HTP catalogs (`ggml-hexagon.dll` + `libggml-htp-v73.so` + `libggml-htp.cat`). Secure Boot, BitLocker, Smart App Control, and anti-cheat remain untouched.
-- **Native Unsloth `Q4_0` GGUF Support:** Runs official `unsloth/*-GGUF:Q4_0` models from Hugging Face on Hexagon `HTP0` with dynamic `--nctx` support, automatic RAM management (unloading `llama-server` on 16 GB devices), tool calling, and reasoning controls.
+- **Universal `8–128 GB` Auto-Scaling & Hybrid NPU + Read-Only NVMe SSD `mmap` Offload (`0 TBW`):** Automatically selects `in_ram_npu` vs `hybrid_npu_ssd` (`GGML_HEXAGON_RT_REPACK=0`, `LLAMA_ARG_REPACK=0`) so 16 GB Snapdragon laptops can stream inactive `24B–35B` MoE experts from NVMe via read-only OS page-cache `mmap` while pinning shared layers and Multi-Token Prediction (`MTP`, `--spec-type draft-mtp`) draft heads in RAM/Hexagon `HTP0`.
+- **Live-RAM Context Clamping & Self-Healing Auto-Respawn:** Dynamically clamps `--nctx` (`4096 / 8192 / 16384+`) against live `avail_ram_gb` headroom (stopping any prior child before probing), caches `/v1/models` & Studio export scans (`5s`/`15s` TTL), dynamically queries `geniex.exe --version`, and automatically respawns `geniex.exe` at stepped-down context if a child exits mid-session.
+- **Native Unsloth `Q4_0` GGUF & 26-Model Curated Catalog (`models.json`):** Runs `Moon-Beam-8B-A1B`, `Ornith-1.5-9B / 35B-A3B`, `Gemma-4 (E2B / E4B / 12B / 26B-A4B)`, `Qwen3 / 3.5 / 3.6`, `LFM2.5-24B-A2B`, `Granite-4.2`, `Phi-4-mini`, and `Llama-3.2` with `--hf-mtp-file` draft-head staging, tool calling, and reasoning controls.
 - **Live NPU Utilization Monitoring:** Wires Windows `DEVPKEY_GPU_LUID` (`cfgmgr32.dll`) + `pdh.dll` GPU Engine counters into Unsloth Studio's `npu_load_percent()` monitor in `<1 ms` with zero PowerShell subprocess overhead.
 - **Cleanly Reversible:** Remove anytime via `--revert` or by deleting `unsloth_qualcomm_npu_bridge.pth`.
 
@@ -163,6 +165,13 @@ Qualcomm GenieX's `ggml-hexagon` backend accelerates standard `Q4_0`, `Q8_0`, `Q
   --hf-file Moon-Beam-8B-A1B-Q4_K_M.gguf `
   --quant Q4_0 --also-register-source
 
+# Register an SSD-offloaded MoE model alongside its MTP speculative draft head
+& "$env:USERPROFILE\.unsloth\studio\unsloth_studio\Scripts\python.exe" .\convert_to_hexagon.py `
+  --hf-repo unsloth/gemma-4-26B-A4B-it-GGUF `
+  --hf-file gemma-4-26B-A4B-it-UD-IQ4_NL.gguf `
+  --hf-mtp-file MTP/mtp-gemma-4-26B-A4B-it-Q8_0.gguf `
+  --name unsloth/gemma-4-26B-A4B-it-NPU --no-convert
+
 # Convert any local GGUF file (F16 / BF16 / Q4_K_M / IQ3_XXS / Studio export)
 & "$env:USERPROFILE\.unsloth\studio\unsloth_studio\Scripts\python.exe" .\convert_to_hexagon.py C:\path\to\model.gguf --quant Q4_0
 
@@ -179,7 +188,7 @@ Verified `tablinum/Moon-Beam-8B-A1B-GGUF` (`8B total / 1B active` `bailingmoe3` 
 | **`Q4_0` (Converted via `convert_to_hexagon.py`)** | `4.71 GB` | **111.2 – 131.4 tok/s** | **27.3 – 27.9 tok/s** | `think=on/off` verified |
 | **`Q4_K_M`** | `4.94 GB` | **103.3 – 123.1 tok/s** | **26.0 – 26.3 tok/s** | `think=on/off` verified |
 
-### Curated Catalog (`models.json`)
+### Curated Catalog (`models.json` — 26 Presets)
 
 Edit `%USERPROFILE%\.unsloth\qualcomm-npu-bridge\models.json` to add any Hugging Face `<org>/<repo>:Q4_0` GGUF repository:
 
